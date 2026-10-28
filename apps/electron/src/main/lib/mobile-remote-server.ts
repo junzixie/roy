@@ -29,6 +29,11 @@ interface Options {
    * 只放行 Host，不代表不验证身份：每个 API 仍需要已配对的 Bearer token。
    */
   publicHosts?: () => string[]
+  /**
+   * 长期固定的配对码。固定码等于长期凭据，可能被截图、打印件带出去，
+   * 所以配对成功后会发通知，并可在设置里一键重置让旧码立刻失效。
+   */
+  fixedCode?: () => string | undefined
 }
 class RequestError extends Error { constructor(readonly status: number, message: string) { super(message) } }
 const digest = (s: string): string => createHash('sha256').update(s).digest('hex')
@@ -57,6 +62,12 @@ export class MobileRemoteServer {
     const expiresAt = Date.now() + 5 * 60_000
     this.pairing = { hash: digest(code), expiresAt }
     return { code, expiresAt }
+  }
+  /** 固定码比对：两边先取哈希再常量时间比较，避免按字节耗时泄露长度或前缀 */
+  private isFixedCode(code: string): boolean {
+    const fixed = this.options.fixedCode?.()
+    if (!fixed) return false
+    try { return timingSafeEqual(Buffer.from(digest(code)), Buffer.from(digest(fixed))) } catch { return false }
   }
   revoke(id: string): void {
     const next = this.devices.filter(d => d.id !== id)
@@ -194,7 +205,9 @@ export class MobileRemoteServer {
       const input = await this.body(req)
       const code = typeof input.code === 'string' ? input.code : ''
       const pairing = this.pairing
-      if (!pairing || pairing.expiresAt < Date.now() || code.length !== 43 || !timingSafeEqual(Buffer.from(digest(code)), Buffer.from(pairing.hash))) throw new RequestError(403, '二维码已过期或失效，请在电脑上重新生成')
+      const fixed = this.isFixedCode(code)
+      const tempValid = !!pairing && pairing.expiresAt >= Date.now() && code.length === 43 && timingSafeEqual(Buffer.from(digest(code)), Buffer.from(pairing.hash))
+      if (!fixed && !tempValid) throw new RequestError(403, '二维码已过期或失效，请在电脑上重新生成')
       if (this.pairingBusy) throw new RequestError(409, '另一台手机正在连接，请稍后再扫')
       const deviceKey = typeof input.deviceKey === 'string' && /^[A-Za-z0-9_-]{16,64}$/.test(input.deviceKey) ? input.deviceKey : ''
       const deviceKeyHash = deviceKey ? digest(deviceKey) : undefined
@@ -204,8 +217,10 @@ export class MobileRemoteServer {
       try {
         const name = (typeof input.name === 'string' ? input.name : '我的手机').replace(/[\x00-\x1f\x7f]/g, '').trim().slice(0, 60) || '我的手机'
         const approved = await this.options.approve(name, address)
-        if (!approved || this.pairing !== pairing || pairing.expiresAt < Date.now() || !this.server) throw new RequestError(403, '二维码已失效，请在电脑上重新生成')
-        this.pairing = undefined
+        // 固定码不占一次性配额，校验临时码时仍要确认它没被别处替换或过期
+        if (!approved || (!fixed && (this.pairing !== pairing || pairing!.expiresAt < Date.now())) || !this.server) throw new RequestError(403, '二维码已失效，请在电脑上重新生成')
+        // 只作废临时码；固定码长期有效
+        if (!fixed) this.pairing = undefined
         const token = randomBytes(32).toString('base64url')
         const now = Date.now()
         // 同一台手机：沿用原来的记录（旧令牌作废），列表里不会多出一行

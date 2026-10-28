@@ -21,6 +21,7 @@ import {
 } from '../ui/select'
 import { Button } from '../ui/button'
 import { cn } from '@/lib/utils'
+import { DiskScanCard } from './DiskScanCard'
 
 interface StorageCategory {
   label: string
@@ -320,6 +321,9 @@ export function StorageSettings(): React.ReactElement {
           </SettingsRow>
         </SettingsCard>
       </SettingsSection>
+
+      {/* 可清理内容扫描（只读建议） */}
+      <DiskScanCard />
 
       {/* 操作结果提示 */}
       {lastResult && (

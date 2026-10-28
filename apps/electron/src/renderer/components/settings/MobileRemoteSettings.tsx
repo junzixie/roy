@@ -67,7 +67,7 @@ export function MobileRemoteSettings(): React.ReactElement {
         : relayState?.state === 'error' ? `连接失败：${relayState.message ?? ''}`
           : '未连接（切到「公网」后自动连接）'
   return <>
-    <SettingsToggle label="允许手机遥控" description="默认仅同一 Wi-Fi 可用；填了公网地址后，手机在任何网络下都能连。扫码即可连接（二维码 5 分钟内有效、只能用一次）；可随时移除手机。" checked={!!status?.enabled} onCheckedChange={async checked => { setError(''); try { setStatus(await window.electronAPI.setMobileRemoteEnabled(checked)); if (!checked) setPairing(undefined) } catch { setError('保存失败，请重试') } }} />
+    <SettingsToggle label="允许手机遥控" description="默认仅同一 Wi-Fi 可用；填了公网地址后，手机在任何网络下都能连。扫固定二维码即可连上，同一台手机只需扫一次；可随时移除手机。" checked={!!status?.enabled} onCheckedChange={async checked => { setError(''); try { setStatus(await window.electronAPI.setMobileRemoteEnabled(checked)); if (!checked) setPairing(undefined) } catch { setError('保存失败，请重试') } }} />
     {status?.enabled && <SettingsRow label="连接方式" description={mode === 'lan' ? `局域网：手机需和电脑在同一 Wi-Fi（${status.addresses[0] ?? '正在获取'}）` : '公网：手机在任何网络都能连（需先填公网地址）'}>
       <div className="flex overflow-hidden rounded-md border border-border text-[13px]">
         <button type="button" className={`h-8 px-3 ${mode === 'lan' ? 'bg-primary text-primary-foreground' : 'hover:bg-foreground/[0.05]'}`} onClick={() => { void changeMode('lan') }}>局域网</button>
@@ -98,8 +98,20 @@ export function MobileRemoteSettings(): React.ReactElement {
         </div>
       </details>
     )}
-    {status?.enabled && <SettingsRow label="配对手机" description={status.running ? (mode === 'public' && savedHost ? `公网：https://${savedHost}` : `局域网地址：${status.addresses.join('、') || '正在获取'}`) : status.error || '服务未启动'}><button type="button" className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" onClick={async () => { try { setPairing(await window.electronAPI.createMobileRemotePairing()) } catch (e) { setError(e instanceof Error ? e.message : '生成二维码失败') } }}>显示二维码</button></SettingsRow>}
-    {pairing && <div className="px-4 py-3"><img src={pairing.qr} alt="手机遥控配对二维码" width={180} height={180} /><p className="mt-2 break-all text-xs text-foreground/50">{pairing.url}</p><p className="text-xs text-foreground/50">5 分钟内有效，只能用一次。用手机浏览器或微信扫一扫打开。</p></div>}
+    {status?.enabled && <SettingsRow label="配对手机" description={status.running ? (mode === 'public' && savedHost ? `公网：https://${savedHost}` : `局域网地址：${status.addresses.join('、') || '正在获取'}`) : status.error || '服务未启动'}>
+      <div className="flex items-center gap-2">
+        <button type="button" className="rounded-md bg-primary px-3 py-2 text-sm text-primary-foreground" onClick={async () => { try { setPairing(await window.electronAPI.fixedMobileRemotePairing()) } catch (e) { setError(e instanceof Error ? e.message : '生成二维码失败') } }}>显示固定二维码</button>
+        <button type="button" className="rounded-md border border-border px-3 py-2 text-sm hover:bg-foreground/[0.05]" onClick={async () => { try { setPairing(await window.electronAPI.createMobileRemotePairing()) } catch (e) { setError(e instanceof Error ? e.message : '生成二维码失败') } }}>一次性码</button>
+      </div>
+    </SettingsRow>}
+    {pairing && <div className="px-4 py-3">
+      <img src={pairing.qr} alt="手机遥控配对二维码" width={180} height={180} />
+      <p className="mt-2 break-all text-xs text-foreground/50">{pairing.url}</p>
+      {pairing.expiresAt === 0
+        ? <p className="text-xs text-foreground/50">长期有效，可截图保存或打印。手机连上后会收到通知；如有泄露，点下面「重置固定码」立刻作废。</p>
+        : <p className="text-xs text-foreground/50">5 分钟内有效，只能用一次。用手机浏览器或微信扫一扫打开。</p>}
+      {pairing.expiresAt === 0 && <button type="button" className="mt-2 text-[12px] text-destructive hover:underline" onClick={async () => { if (!window.confirm('重置后旧二维码立刻失效，已配对的手机不受影响。继续？')) return; try { setPairing(await window.electronAPI.resetMobileRemotePairCode()) } catch (e) { setError(e instanceof Error ? e.message : '重置失败') } }}>重置固定码</button>}
+    </div>}
     <DeviceList devices={status?.devices ?? []} onRevoke={async (ids) => { let next = status; for (const id of ids) next = await window.electronAPI.revokeMobileRemoteDevice(id); if (next) setStatus(next) }} />
     {error && <p className="px-4 pb-3 text-sm text-destructive">{error}</p>}
   </>

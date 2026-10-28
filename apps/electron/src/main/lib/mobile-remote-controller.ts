@@ -1,4 +1,5 @@
 import { networkInterfaces } from 'node:os'
+import { randomBytes } from 'node:crypto'
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import QRCode from 'qrcode'
@@ -22,6 +23,25 @@ function loadDevices(): RemoteDeviceRecord[] {
 }
 function saveDevices(devices: RemoteDeviceRecord[]): void {
   mkdirSync(getConfigDir(), { recursive: true }); writeFileSync(file(), JSON.stringify({ devices }), { mode: 0o600 })
+}
+/**
+ * 固定配对码：长期有效，手机扫一次后存下令牌，以后不用再扫。
+ * 只存在本机 0600 文件里，不进设置（设置会被导出/同步）；重置即重新生成，旧码立刻失效。
+ */
+function fixedCodeFile(): string { return join(getConfigDir(), 'mobile-remote-pair-code.json') }
+function loadFixedCode(): string | undefined {
+  try {
+    const value = JSON.parse(readFileSync(fixedCodeFile(), 'utf8'))
+    return typeof value.code === 'string' && /^[A-Za-z0-9_-]{43}$/.test(value.code) ? value.code : undefined
+  } catch { return undefined }
+}
+function ensureFixedCode(): string {
+  const existing = loadFixedCode()
+  if (existing) return existing
+  const code = randomBytes(32).toString('base64url')
+  mkdirSync(getConfigDir(), { recursive: true })
+  writeFileSync(fixedCodeFile(), JSON.stringify({ code, createdAt: Date.now() }), { mode: 0o600 })
+  return code
 }
 function hosts(): string[] {
   return Object.values(networkInterfaces()).flat().filter(x => x && x.family === 'IPv4' && !x.internal).map(x => x!.address)
@@ -56,7 +76,7 @@ export async function setMobileRemoteEnabled(enabled: boolean): Promise<MobileRe
 export async function startMobileRemote(): Promise<void> {
   if (!getSettings().mobileRemoteEnabled || server) return
   gateway = new MobileRemoteGateway(() => server?.notify(), (s, r, i, t) => server?.pushText(s, r, i, t))
-  server = new MobileRemoteServer({ html: MOBILE_REMOTE_HTML, devices: loadDevices(), save: saveDevices, hosts, publicHosts, gateway, approve: async (name, address) => {
+  server = new MobileRemoteServer({ html: MOBILE_REMOTE_HTML, devices: loadDevices(), save: saveDevices, hosts, publicHosts, fixedCode: () => loadFixedCode(), gateway, approve: async (name, address) => {
     // 二维码是一次性的（43 位随机码、5 分钟过期、用过即失效），只有看得到这台电脑屏幕的人能扫到，
     // 所以不再弹确认框；连上后发一条不用点的通知，可在设置 → 手机遥控里随时移除。
     try { if (Notification.isSupported()) new Notification({ title: '手机已连接 Roy', body: `${name}（${address.replace(/^::ffff:/, '')}）已连接，可在设置 → 手机遥控里移除` }).show() } catch { /* 通知失败不影响配对 */ }
@@ -94,3 +114,28 @@ export async function createMobileRemotePairing(): Promise<MobileRemotePairing> 
   return { url, qr: await QRCode.toDataURL(url, { margin: 1, width: 280 }), expiresAt: pairing.expiresAt }
 }
 export function revokeMobileRemoteDevice(id: string): MobileRemoteStatus { server?.revoke(id); return mobileRemoteStatus() }
+
+/** 固定二维码：同一个码长期不变，可截图保存、打印贴墙上；重置后旧码立刻失效 */
+export async function fixedMobileRemotePairing(): Promise<MobileRemotePairing> {
+  if (!server) throw new Error('请先开启手机遥控')
+  const code = ensureFixedCode()
+  const mode = getSettings().mobileRemoteNetworkMode
+  const publicEntry = mode === 'lan' || !hasProFeature('mobile-remote-public') ? undefined : publicHosts()[0]
+  if (mode === 'public' && !hasProFeature('mobile-remote-public')) throw new Error('公网手机遥控需要激活 Pro（设置 → 账号 → 软件激活）；局域网模式免费')
+  if (mode === 'public' && !publicEntry) throw new Error('当前选了公网模式，但还没填公网地址')
+  const url = publicEntry
+    ? `https://${publicEntry}/?code=${encodeURIComponent(code)}`
+    : (() => {
+      const address = lanHosts()[0]
+      if (!address) throw new Error('没有可用的局域网地址，请确认已连接 Wi-Fi')
+      return `http://${address}:${server!.port}/?code=${encodeURIComponent(code)}`
+    })()
+  return { url, qr: await QRCode.toDataURL(url, { margin: 1, width: 280 }), expiresAt: 0 }
+}
+
+/** 重置固定码：生成新的，旧二维码立刻作废；已配对的手机不受影响（用的是各自令牌） */
+export async function resetMobileRemotePairCode(): Promise<MobileRemotePairing> {
+  mkdirSync(getConfigDir(), { recursive: true })
+  writeFileSync(fixedCodeFile(), JSON.stringify({ code: randomBytes(32).toString('base64url'), createdAt: Date.now() }), { mode: 0o600 })
+  return fixedMobileRemotePairing()
+}

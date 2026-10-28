@@ -774,4 +774,6 @@ export const STORAGE_IPC_CHANNELS = {
   CLEANUP: 'storage:cleanup',
   /** 仅清理临时文件（启动时/快速清理） */
   CLEANUP_TEMP: 'storage:cleanup-temp',
+  /** 扫描系统各处可清理内容并给出建议（只读，不删除） */
+  SCAN_CLEANABLE: 'storage:scan-cleanable',
 } as const

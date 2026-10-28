@@ -17,7 +17,6 @@
 import { titleProviderFor } from './title-provider'
 import { USER_MESSAGE_DELIVERED_SUBTYPE } from './adapters/queued-user-message-delivery'
 import { checkpointsAfter, dropCheckpointsAfter, restoreCheckpoints } from './file-checkpoints'
-import { resolveAgentWorkMode, isProFeatureUnlocked } from './adapters/mode-switching-adapter'
 import { releaseComputerSession } from './computer-control'
 import { getEffectiveWorkspaceMcpServers } from './agent-workspace-manager'
 import { resolveRoyMarketMcpEntry } from './roy-market'
@@ -441,7 +440,7 @@ export class AgentOrchestrator {
       const request = providerAdapter.buildTitleRequest({
         baseUrl: channel.baseUrl,
         apiKey,
-        // DeepSeek 优化模式（Pro）：起标题这类杂活改用同渠道里更便宜的 Flash 模型
+        // 起标题这类杂活改用同渠道里更便宜的 Flash 模型（对所有工作模式生效）
         modelId: resolveChoreModelId(channel.models ?? [], modelId),
         prompt: TITLE_PROMPT + userMessage,
       })
@@ -2734,10 +2733,19 @@ export class AgentOrchestrator {
   }
 }
 
-/** DeepSeek 优化模式下，标题这类杂活换成同渠道里已启用的 DeepSeek Flash 模型；找不到就用原模型 */
+/**
+ * 标题这类杂活换成同渠道里已启用的 Flash 模型；找不到就用原模型。
+ *
+ * 对所有工作模式生效：起标题只要读懂首条消息，用 Pro / 最高档模型纯属浪费。
+ * 原先只在 DeepSeek 优化模式下生效，导致标准模式每次新建会话都按主力模型计一次。
+ *
+ * 三个不降的例外：
+ * - 模型本来就不是 DeepSeek（不能把别家模型换成 DeepSeek Flash）；
+ * - 模型已经是 Flash；
+ * - 渠道里没有可用的 Flash。
+ */
 export function resolveChoreModelId(models: Array<{ id: string; enabled?: boolean }>, modelId: string): string {
   if (!/deepseek/i.test(modelId) || /flash/i.test(modelId)) return modelId
-  if (resolveAgentWorkMode() !== 'deepseek' || !isProFeatureUnlocked()) return modelId
   const flash = models.find((m) => m.enabled !== false && /deepseek/i.test(m.id) && /flash/i.test(m.id))
   return flash?.id ?? modelId
 }

@@ -1565,6 +1565,9 @@ export interface ElectronAPI {
   refreshMobileRemoteRelay: () => Promise<MobileRemoteStatus>
   setMobileRemoteEnabled: (enabled: boolean) => Promise<MobileRemoteStatus>
   createMobileRemotePairing: () => Promise<MobileRemotePairing>
+  /** 固定二维码：长期有效，可截图保存；重置后旧码失效 */
+  fixedMobileRemotePairing: () => Promise<MobileRemotePairing>
+  resetMobileRemotePairCode: () => Promise<MobileRemotePairing>
   revokeMobileRemoteDevice: (id: string) => Promise<MobileRemoteStatus>
 
   // ===== 存储管理 =====
@@ -1575,6 +1578,8 @@ export interface ElectronAPI {
   cleanupStorage: (options: unknown) => Promise<unknown>
   /** 清理临时文件（快速） */
   cleanupTempStorage: () => Promise<unknown>
+  /** 扫描系统可清理内容并返回建议（只读） */
+  scanCleanableStorage: () => Promise<unknown>
 
   // ===== 定时任务（Automation）=====
   /** 获取全部定时任务 */
@@ -3468,6 +3473,8 @@ const electronAPI: ElectronAPI = {
   refreshMobileRemoteRelay: (): Promise<MobileRemoteStatus> => ipcRenderer.invoke('mobile-remote:refresh-relay'),
   setMobileRemoteEnabled: (enabled: boolean): Promise<MobileRemoteStatus> => ipcRenderer.invoke('mobile-remote:set-enabled', enabled),
   createMobileRemotePairing: (): Promise<MobileRemotePairing> => ipcRenderer.invoke('mobile-remote:pair'),
+  fixedMobileRemotePairing: (): Promise<MobileRemotePairing> => ipcRenderer.invoke('mobile-remote:fixed-pair'),
+  resetMobileRemotePairCode: (): Promise<MobileRemotePairing> => ipcRenderer.invoke('mobile-remote:reset-pair-code'),
   revokeMobileRemoteDevice: (id: string): Promise<MobileRemoteStatus> => ipcRenderer.invoke('mobile-remote:revoke', id),
 
   // ===== 存储管理 =====
@@ -3482,6 +3489,10 @@ const electronAPI: ElectronAPI = {
 
   cleanupTempStorage: () => {
     return ipcRenderer.invoke(STORAGE_IPC_CHANNELS.CLEANUP_TEMP)
+  },
+
+  scanCleanableStorage: () => {
+    return ipcRenderer.invoke(STORAGE_IPC_CHANNELS.SCAN_CLEANABLE)
   },
 
   // ===== 定时任务（Automation）=====

@@ -45,6 +45,10 @@ export interface StorageCategory {
   orphanItemsTruncated: boolean
   /** 按项目拆分的占用明细（目前只有项目与会话数据提供） */
   projects?: StorageProjectUsage[]
+  /** 是否可以安全清理（新增） */
+  safeToClean?: boolean
+  /** 清理建议（新增） */
+  cleanupSuggestion?: string
 }
 
 /** 单个项目的磁盘占用 */
@@ -59,6 +63,12 @@ export interface StorageProjectUsage {
   /** 已不在活跃列表里、可以安全清理的字节数 */
   orphanBytes: number
   orphanCount: number
+  /** 是否是归档项目（新增） */
+  isArchived?: boolean
+  /** 最后访问时间（新增） */
+  lastAccessedAt?: number
+  /** 残余文件类型（新增） */
+  residualFileTypes?: string[]
 }
 
 export interface StorageOrphanItem {
@@ -350,6 +360,17 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
           let projectSessionCount = 0
           let projectOrphanBytes = 0
           let projectOrphanCount = 0
+
+          // 检查项目最后访问时间
+          let lastAccessedAt = 0
+          try {
+            const stat = await fsPromises.stat(slugDir)
+            lastAccessedAt = stat.mtimeMs
+          } catch { /* 忽略 */ }
+
+          // 扫描残余文件类型
+          const residualFileTypes = new Set<string>()
+
           for (const entry of entries) {
             const entryPath = join(slugDir, entry)
             try {
@@ -359,6 +380,12 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
                   bytes += stat.size
                   projectBytes += stat.size
                   count++
+
+                  // 记录文件扩展名
+                  const ext = entry.split('.').pop()
+                  if (ext && ext.length < 10) {
+                    residualFileTypes.add(`.${ext}`)
+                  }
                 }
                 continue
               }
@@ -393,6 +420,10 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
               }
             } catch { /* skip */ }
           }
+
+          // 判断是否是归档项目（30 天未访问）
+          const isArchived = lastAccessedAt > 0 && (Date.now() - lastAccessedAt) > (30 * 24 * 60 * 60 * 1000)
+
           projects.push({
             slug,
             name: nameBySlug.get(slug) ?? slug,
@@ -401,6 +432,9 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
             sessionCount: projectSessionCount,
             orphanBytes: projectOrphanBytes,
             orphanCount: projectOrphanCount,
+            isArchived,
+            lastAccessedAt,
+            residualFileTypes: Array.from(residualFileTypes),
           })
         } catch { /* skip */ }
       }
@@ -418,6 +452,10 @@ async function calcWorkspacesCategory(): Promise<StorageCategory> {
     orphanBytes, orphanCount,
     orphanItems, orphanItemsTruncated,
     projects,
+    safeToClean: orphanCount > 0,
+    cleanupSuggestion: orphanCount > 0
+      ? `发现 ${orphanCount} 个孤儿会话，可释放 ${(orphanBytes / (1024 * 1024)).toFixed(1)} MB`
+      : undefined,
   }
 }
 

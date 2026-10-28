@@ -111,6 +111,10 @@ const OPENAI_MAX_LEVELS = [...OPENAI_STANDARD_LEVELS, 'max'] as const satisfies 
 // DeepSeek Anthropic compatibility only honors output_config.effort. The official
 // V4 Flash and Pro mappings differ at low and xhigh; off is handled by emitting
 // `thinking: { type: 'disabled' }` rather than an effort value.
+//
+// 同一份档位映射同时用于 OpenAI 兼容协议（chat-completions 的 reasoning_effort、
+// responses 的 reasoning.effort）。三种协议表达的是同一个服务端语义，拆成两份表
+// 只会让 Relay 渠道悄悄退回默认档。
 const DEEPSEEK_V4_FLASH_EFFORT_MAP: ReasoningEffortMap = {
   minimal: null,
   low: 'low',
@@ -245,6 +249,8 @@ const DEEPSEEK_V4_FLASH_PROFILE: ReasoningProfile = {
   normalize: normalizeDeepSeekV4Level,
   encodings: {
     'anthropic-messages': { kind: 'deepseek-output-effort', effortMap: DEEPSEEK_V4_FLASH_EFFORT_MAP },
+    'openai-completions': { kind: 'openai-reasoning-effort', effortMap: DEEPSEEK_V4_FLASH_EFFORT_MAP },
+    'openai-responses': { kind: 'openai-reasoning-effort', effortMap: DEEPSEEK_V4_FLASH_EFFORT_MAP },
   },
 }
 
@@ -255,6 +261,8 @@ const DEEPSEEK_FLASH_PROFILE: ReasoningProfile = {
   normalize: normalizeDeepSeekV4Level,
   encodings: {
     'anthropic-messages': { kind: 'deepseek-output-effort', effortMap: DEEPSEEK_V4_FLASH_EFFORT_MAP },
+    'openai-completions': { kind: 'openai-reasoning-effort', effortMap: DEEPSEEK_V4_FLASH_EFFORT_MAP },
+    'openai-responses': { kind: 'openai-reasoning-effort', effortMap: DEEPSEEK_V4_FLASH_EFFORT_MAP },
   },
 }
 
@@ -265,6 +273,8 @@ const DEEPSEEK_V4_PRO_PROFILE: ReasoningProfile = {
   normalize: normalizeDeepSeekV4Level,
   encodings: {
     'anthropic-messages': { kind: 'deepseek-output-effort', effortMap: DEEPSEEK_V4_PRO_EFFORT_MAP },
+    'openai-completions': { kind: 'openai-reasoning-effort', effortMap: DEEPSEEK_V4_PRO_EFFORT_MAP },
+    'openai-responses': { kind: 'openai-reasoning-effort', effortMap: DEEPSEEK_V4_PRO_EFFORT_MAP },
   },
 }
 
@@ -359,9 +369,11 @@ export function resolveReasoningProfile(input: ResolveReasoningProfileInput): Re
   }
   const profile = /^deepseek-flash(?:-|$)/.test(modelId)
     ? DEEPSEEK_FLASH_PROFILE
-    : /^deepseek-v4-flash(?:-|$)/.test(modelId)
+    // 允许带版本号的别名（deepseek-v4.1-flash、deepseek-v4.2-pro）：中转站常自行
+    // 加小数版本，精确匹配会让这些渠道静默失去档位映射，退回服务端默认值。
+    : /^deepseek-v4(?:\.\d+)?-flash(?:-|$)/.test(modelId)
       ? DEEPSEEK_V4_FLASH_PROFILE
-      : /^deepseek-v4-pro(?:-|$)/.test(modelId)
+      : /^deepseek-v4(?:\.\d+)?-pro(?:-|$)/.test(modelId)
         ? DEEPSEEK_V4_PRO_PROFILE
       : /^(?:k3(?:-256k)?|kimi-k3)$/.test(modelId)
         ? K3_PROFILE

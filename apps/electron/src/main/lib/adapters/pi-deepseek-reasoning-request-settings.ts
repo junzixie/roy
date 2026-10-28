@@ -5,6 +5,7 @@ import {
   type AgentThinkingLevel,
   type ReasoningProfile,
 } from '@roy/shared'
+import { DEEPSEEK_SIMPLE_TURN_DOWNGRADE, isSimpleTurn, resolveSimpleTurnLevel } from './simple-turn-downgrade'
 
 type ProviderPayload = Record<string, unknown>
 
@@ -18,14 +19,16 @@ export interface DeepSeekReasoningRequestSettings {
 }
 
 /**
- * 简单回合降一档。
+ * 简单回合降档。
  *
  * DeepSeek V4 的档位只有 off / low / high / xhigh / max，没有 medium；`medium` 会被
  * normalizeDeepSeekV4Level 折回 high，所以不能拿它当中转档——否则 high→medium 注入后
  * 仍是 effort=high，等于没降。这里直接落到实际存在的档位。
  * xhigh / max 是用户明确要的最强档，不动。
+ *
+ * 判定逻辑已抽到 simple-turn-downgrade，与标准模式共用一套口径，避免两个模式对
+ * 「什么算简单回合」给出不同答案。这里保留原函数名与签名，供既有调用方和测试使用。
  */
-const DOWNGRADE: Partial<Record<AgentThinkingLevel, AgentThinkingLevel>> = { high: 'low', medium: 'low' }
 const SIMPLE_TURN_MAX_CHARS = 40
 /** 需要认真推理的词：出现就不降档 */
 const COMPLEX_HINT = /(为什么|原因|分析|设计|架构|方案|重构|排查|调试|debug|bug|报错|错误|优化|性能|证明|推导|算法|比较|评估|review|审查|计划|规划)/i
@@ -35,26 +38,17 @@ const COMPLEX_HINT = /(为什么|原因|分析|设计|架构|方案|重构|排�
  * 且不含需要深入推理的词。工具循环中途的请求一律不降档，保证干活质量。
  */
 export function isSimpleUserTurn(payload: unknown): boolean {
-  if (!isProviderPayload(payload) || !Array.isArray(payload.messages)) return false
-  const last = payload.messages[payload.messages.length - 1] as { role?: unknown; content?: unknown } | undefined
-  if (!last || last.role !== 'user') return false
-  let text = ''
-  if (typeof last.content === 'string') text = last.content
-  else if (Array.isArray(last.content)) {
-    for (const block of last.content as Array<{ type?: unknown; text?: unknown }>) {
-      if (block?.type === 'tool_result') return false
-      if (block?.type === 'text' && typeof block.text === 'string') text = block.text
-    }
-  }
-  // 每条消息前面会带实时环境信息，只看最后一段用户真正打的字
-  const userText = text.split(/\n{2,}/).pop()?.trim() ?? ''
-  return userText.length > 0 && userText.length <= SIMPLE_TURN_MAX_CHARS && !COMPLEX_HINT.test(userText)
+  return isSimpleTurn(payload, { maxChars: SIMPLE_TURN_MAX_CHARS, complexHint: COMPLEX_HINT })
 }
 
 /** 简单回合降一档；off / minimal / low / xhigh / max 保持不变 */
 export function downgradeForSimpleTurn(level: AgentThinkingLevel | undefined, payload: unknown): AgentThinkingLevel | undefined {
-  if (!level || !isSimpleUserTurn(payload)) return level
-  return DOWNGRADE[level] ?? level
+  const downgraded = resolveSimpleTurnLevel(level, payload, {
+    maxChars: SIMPLE_TURN_MAX_CHARS,
+    complexHint: COMPLEX_HINT,
+    downgradeMap: DEEPSEEK_SIMPLE_TURN_DOWNGRADE,
+  })
+  return (downgraded ?? level) as AgentThinkingLevel | undefined
 }
 
 function isProviderPayload(payload: unknown): payload is ProviderPayload {

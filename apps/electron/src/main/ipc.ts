@@ -242,7 +242,7 @@ import {
 import { extractTextFromAttachment } from './lib/document-parser'
 import { getUserProfile, updateUserProfile } from './lib/user-profile-service'
 import { getSettings, updateSettings } from './lib/settings-service'
-import { mobileRemoteStatus, setMobileRemoteEnabled, createMobileRemotePairing, revokeMobileRemoteDevice, refreshMobileRemoteRelay } from './lib/mobile-remote-controller'
+import { mobileRemoteStatus, setMobileRemoteEnabled, createMobileRemotePairing, revokeMobileRemoteDevice, refreshMobileRemoteRelay, fixedMobileRemotePairing, resetMobileRemotePairCode } from './lib/mobile-remote-controller'
 import { refreshAgentIslandConfiguration, markAgentIslandSessionViewed } from './lib/agent-island-service'
 import { getAgentStatusHoverWindow } from './agent-status-hover-window'
 import { setDockBadgeCount } from './lib/dock-badge-service'
@@ -329,6 +329,7 @@ import { getAgentSessionWorkspacePath, getAgentWorkspacesDir, getConfigDir, getW
 import { getCachedDefaultAppInfo, saveCachedDefaultAppInfo } from './lib/default-app-cache'
 import { calculateStorageStats, cleanupStorage, cleanupTempFiles } from './lib/storage-service'
 import type { CleanupOptions } from './lib/storage-service'
+import { scanCleanableItems } from './lib/disk-scan-service'
 import {
   listAgentWorkspaces,
   listAgentWorkspacesWithProjectRootStatus,
@@ -1439,6 +1440,8 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('mobile-remote:status', () => mobileRemoteStatus())
   ipcMain.handle('mobile-remote:set-enabled', (_, enabled: boolean) => setMobileRemoteEnabled(enabled === true))
   ipcMain.handle('mobile-remote:pair', () => createMobileRemotePairing())
+  ipcMain.handle('mobile-remote:fixed-pair', () => fixedMobileRemotePairing())
+  ipcMain.handle('mobile-remote:reset-pair-code', () => resetMobileRemotePairCode())
   ipcMain.handle('mobile-remote:revoke', (_, id: string) => revokeMobileRemoteDevice(String(id ?? '')))
   ipcMain.handle('mobile-remote:refresh-relay', () => refreshMobileRemoteRelay())
   // ===== 本地终端（仅主 renderer 可操作，不能指定可执行文件） =====
@@ -5824,6 +5827,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle(STORAGE_IPC_CHANNELS.CLEANUP_TEMP, async () => {
     return cleanupTempFiles()
+  })
+
+  ipcMain.handle(STORAGE_IPC_CHANNELS.SCAN_CLEANABLE, async () => {
+    return scanCleanableItems()
   })
 
   // 启动时自动清理临时文件

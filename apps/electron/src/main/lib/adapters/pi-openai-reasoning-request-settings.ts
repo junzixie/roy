@@ -5,6 +5,7 @@ import {
   type AgentThinkingLevel,
   type ReasoningProfile,
 } from '@roy/shared'
+import { resolveSimpleTurnLevel, type SimpleTurnOptions } from './simple-turn-downgrade'
 
 type ProviderPayload = Record<string, unknown>
 
@@ -13,6 +14,15 @@ export interface OpenAIReasoningRequestSettings {
   thinkingLevel?: AgentThinkingLevel
   /** 每次请求读取，避免扩展闭包锁住启动时的档位。 */
   getThinkingLevel?: () => AgentThinkingLevel | undefined
+  /**
+   * 简单回合降档（标准模式默认开启）。
+   *
+   * 实测 output<200 的请求占 42.1%，其中大量是「继续」「好」这类短指令，按最高档
+   * 跑没有收益。降档只影响本轮请求的 effort，不改会话设置。
+   */
+  simpleTurnDowngrade?: boolean
+  /** 降档判定参数；不传用标准模式默认口径。 */
+  simpleTurnOptions?: SimpleTurnOptions
 }
 
 function isProviderPayload(payload: unknown): payload is ProviderPayload {
@@ -67,9 +77,13 @@ export function createOpenAIReasoningRequestExtension(
 ): (pi: ExtensionAPI) => void {
   return (pi) => {
     pi.on('before_provider_request', (event) => {
+      const level = settings.getThinkingLevel?.() ?? settings.thinkingLevel
+      const effectiveLevel = settings.simpleTurnDowngrade === false
+        ? level
+        : (resolveSimpleTurnLevel(level, event.payload, settings.simpleTurnOptions) ?? level) as AgentThinkingLevel | undefined
       const updatedPayload = injectOpenAIReasoningLevel(event.payload, {
         ...settings,
-        thinkingLevel: settings.getThinkingLevel?.() ?? settings.thinkingLevel,
+        thinkingLevel: effectiveLevel,
       })
       return updatedPayload === event.payload ? undefined : updatedPayload
     })
