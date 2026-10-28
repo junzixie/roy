@@ -1,0 +1,21 @@
+[install]
+# 依赖缓存统一放 D 盘，避免占满 C 盘
+cacheDir = "D:/ai-projects/yilai/bun/install/cache"
+registry = "https://registry.npmmirror.com"
+
+[test]
+# 所有测试先把主目录指到临时目录，绝不碰真实的 ~/.roy
+preload = ["./scripts/test-isolate-home.ts"]
+# 注意：请用 `bun run test`（带 --isolate，见根 package.json），不要直接 `bun test`：
+# 不少测试用 mock.module 替换 electron / channel-manager 等模块，不隔离时替换会泄漏到后面的文件。
+# 备份、安装包解包目录、镜像和临时目录里有旧代码的副本，不参与测试，否则会出现几百个假失败
+pathIgnorePatterns = [
+  "backups/**",
+  "release/**",
+  "mirror/**",
+  "_tmp/**",
+  "旧文档/**",
+  "**/node_modules/**",
+  "apps/electron/out/**",
+  "apps/electron/dist/**",
+]

@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Roy</title>
+    <script>
+      // 主题初始化脚本（在 React 加载前执行，避免闪烁）
+      // 从 localStorage 缓存读取主题模式和特殊风格，立即应用类名
+      ;(function() {
+        var mode = localStorage.getItem('roy-theme-mode') || 'dark'
+        var style = localStorage.getItem('roy-theme-style')
+        var html = document.documentElement
+
+        if (mode === 'special' && style && style !== 'default') {
+          // 特殊风格模式：添加主题类名 + 根据后缀决定 dark 类
+          html.classList.add('theme-' + style)
+          if (style.endsWith('-dark')) {
+            html.classList.add('dark')
+          }
+        } else if (mode === 'dark') {
+          html.classList.add('dark')
+        } else if (mode === 'system') {
+          if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+            html.classList.add('dark')
+          }
+        }
+        // mode === 'light' 时不添加 dark 类
+
+        // 启动期间让出底色：React 挂载前 body 的 bg-background（浅色主题下是灰白）
+        // 会直接上屏，与深色启动页交界处会闪一下灰白。
+        // 这里先把 html/body 置透明，露出主窗口的 backgroundColor（#050b0e），
+        // 待 React 首次渲染后由 main.tsx 移除 data-roy-booting 属性。
+        html.setAttribute('data-roy-booting', '1')
+        // 兜底：任何异常导致 AppShell 没能撤销标记时，3 秒后强制恢复，
+        // 避免长时间停在透明背景上。
+        setTimeout(function () {
+          document.documentElement.removeAttribute('data-roy-booting')
+        }, 3000)
+      })()
+    </script>
+    <style>
+      /* 启动阶段：不要背景色，交给窗口底色，避免灰白闪屏 */
+      html[data-roy-booting] body {
+        background-color: transparent !important;
+      }
+      html[data-roy-booting] {
+        background-color: transparent !important;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,526 @@
+/**
+ * AI 工具台沉浸页（对标 AIWorkstation 贾维斯）
+ * - 默认：中央球舞台（可说可点）
+ * - 开聊后：本页全屏嵌入 AgentView；返回仍回舞台
+ */
+
+import * as React from 'react'
+import { useAtom, useAtomValue, useSetAtom } from 'jotai'
+import { ArrowLeft, ExternalLink, Loader2, AlertCircle } from 'lucide-react'
+import { toast } from 'sonner'
+import {
+  agentChannelIdAtom,
+  agentModelIdAtom,
+  agentSessionsAtom,
+  agentWorkspacesAtom,
+  currentAgentWorkspaceIdAtom,
+} from '@/atoms/agent-atoms'
+import { channelsAtom } from '@/atoms/chat-atoms'
+import { activeViewAtom } from '@/atoms/active-view'
+import { useOpenSession } from '@/hooks/useOpenSession'
+import { RoyWorkbenchStage, type WorkbenchChip, type RoyOrbState } from '@/components/ai-assistant'
+import {
+  loadWorkbenchSkin,
+  saveWorkbenchSkin,
+  loadWorkbenchMode,
+  saveWorkbenchMode,
+  parseCreateTaskIntent,
+  AI_ASSISTANT_SESSION_TITLE,
+  AI_ASSISTANT_SESSION_ID_KEY,
+  OPEN_AI_ASSISTANT_EVENT,
+  type RoyWorkbenchSkin,
+  type WorkbenchMode,
+} from '@/lib/roy-workbench-prefs'
+import { settingsOpenAtom, settingsTabAtom } from '@/atoms/settings-tab'
+import {
+  setLastFocusedVoiceInputId,
+  VOICE_DICTATION_INSERT_EVENT,
+  VOICE_DICTATION_STATUS_EVENT,
+  isVoiceDictationTargetInput,
+} from '@/lib/voice-input-focus'
+import type { AgentSessionMeta } from '@roy/shared'
+
+const WORKBENCH_VOICE_INPUT_ID = 'roy-ai-workbench-command'
+
+const ASSISTANT_TITLE = AI_ASSISTANT_SESSION_TITLE
+const SESSION_ID_KEY = AI_ASSISTANT_SESSION_ID_KEY
+
+const AgentView = React.lazy(() =>
+  import('@/components/agent').then((m) => ({ default: m.AgentView })),
+)
+
+type Mode = WorkbenchMode
+
+export function AiAssistantPage(): React.ReactElement {
+  const [session, setSession] = React.useState<AgentSessionMeta | null>(null)
+  const [booting, setBooting] = React.useState(true)
+  const [bootError, setBootError] = React.useState<string | null>(null)
+  const [mode, setMode] = React.useState<Mode>(() => loadWorkbenchMode())
+  const [pendingPrompt, setPendingPrompt] = React.useState<string | null>(null)
+  const [busyQuick, setBusyQuick] = React.useState(false)
+  const [skin, setSkin] = React.useState<RoyWorkbenchSkin>(() => loadWorkbenchSkin())
+  const setSettingsOpen = useSetAtom(settingsOpenAtom)
+  const setSettingsTab = useSetAtom(settingsTabAtom)
+
+  const handleSkinChange = React.useCallback((next: RoyWorkbenchSkin) => {
+    setSkin(next)
+    saveWorkbenchSkin(next)
+  }, [])
+
+  const openVoiceSettings = React.useCallback(() => {
+    setSettingsTab('voice-input')
+    setSettingsOpen(true)
+  }, [setSettingsOpen, setSettingsTab])
+
+  const channels = useAtomValue(channelsAtom)
+  const agentChannelId = useAtomValue(agentChannelIdAtom)
+  const agentModelId = useAtomValue(agentModelIdAtom)
+  const [workspaces, setWorkspaces] = useAtom(agentWorkspacesAtom)
+  const [agentSessions, setAgentSessions] = useAtom(agentSessionsAtom)
+  const currentWorkspaceId = useAtomValue(currentAgentWorkspaceIdAtom)
+  const setCurrentWorkspaceId = useSetAtom(currentAgentWorkspaceIdAtom)
+  const setActiveView = useSetAtom(activeViewAtom)
+  const openSession = useOpenSession()
+
+  const agentSessionsRef = React.useRef(agentSessions)
+  agentSessionsRef.current = agentSessions
+  const currentWorkspaceIdRef = React.useRef(currentWorkspaceId)
+  currentWorkspaceIdRef.current = currentWorkspaceId
+
+  const hasAvailableModel = React.useMemo(
+    () => channels.some((channel) => channel.enabled && channel.models.some((model) => model.enabled)),
+    [channels],
+  )
+
+  const modelLabel = React.useMemo(() => {
+    const ch = channels.find((c) => c.id === agentChannelId)
+    if (!ch) return null
+    const m = ch.models.find((x) => x.id === agentModelId) ?? ch.models.find((x) => x.enabled)
+    return m ? `${ch.name} · ${m.name}` : ch.name
+  }, [agentChannelId, agentModelId, channels])
+
+  const workspaceName = React.useMemo(
+    () => workspaces.find((w) => w.id === currentWorkspaceId)?.name ?? null,
+    [currentWorkspaceId, workspaces],
+  )
+
+  const persistMode = React.useCallback((next: Mode) => {
+    setMode(next)
+    saveWorkbenchMode(next)
+  }, [])
+
+  // 侧栏再次点「AI 工具台」时强制回舞台（即使本页已挂载）
+  React.useEffect(() => {
+    const onOpen = (event: Event): void => {
+      const detail = (event as CustomEvent<{ mode?: WorkbenchMode }>).detail
+      persistMode(detail?.mode === 'session' ? 'session' : 'stage')
+    }
+    window.addEventListener(OPEN_AI_ASSISTANT_EVENT, onOpen)
+    return () => window.removeEventListener(OPEN_AI_ASSISTANT_EVENT, onOpen)
+  }, [persistMode])
+
+  React.useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      if (!agentChannelId || !hasAvailableModel) {
+        setBooting(false)
+        setBootError(
+          !agentChannelId
+            ? '还没有选择模型渠道。请先到设置 → 模型渠道里配置并启用一个模型。'
+            : '当前没有可用模型。请在设置 → 模型渠道中启用至少一个模型。',
+        )
+        return
+      }
+      setBooting(true)
+      setBootError(null)
+      try {
+        const remembered = localStorage.getItem(SESSION_ID_KEY)
+        const listedLocal = agentSessionsRef.current
+        let meta =
+          (remembered ? listedLocal.find((item) => item.id === remembered) : undefined)
+          || listedLocal.find((item) => item.title === ASSISTANT_TITLE)
+
+        if (!meta) {
+          const listed = await window.electronAPI.listAgentSessions()
+          meta =
+            (remembered ? listed.find((item) => item.id === remembered) : undefined)
+            || listed.find((item) => item.title === ASSISTANT_TITLE)
+          if (meta) {
+            setAgentSessions((prev) => (prev.some((item) => item.id === meta!.id) ? prev : [meta!, ...prev]))
+          }
+        }
+
+        if (!meta) {
+          meta = await window.electronAPI.createAgentSession(
+            ASSISTANT_TITLE,
+            agentChannelId,
+            currentWorkspaceIdRef.current ?? undefined,
+            agentModelId ?? undefined,
+            false,
+          )
+          setAgentSessions((prev) => [meta!, ...prev.filter((item) => item.id !== meta!.id)])
+        }
+
+        if (cancelled || !meta) return
+        localStorage.setItem(SESSION_ID_KEY, meta.id)
+        setSession(meta)
+        await window.electronAPI.setVisibleAgentStreamSession(meta.id)
+      } catch (error) {
+        if (!cancelled) {
+          setBootError(error instanceof Error ? error.message : String(error))
+        }
+      } finally {
+        if (!cancelled) setBooting(false)
+      }
+    })()
+    return () => { cancelled = true }
+  }, [agentChannelId, agentModelId, hasAvailableModel, setAgentSessions])
+
+  const openFullSession = React.useCallback((): void => {
+    if (!session) return
+    openSession('agent', session.id, session.title || ASSISTANT_TITLE)
+    setActiveView('conversations')
+  }, [openSession, session, setActiveView])
+
+  /** 在「默认项目」下新开一个任务/会话，并可带上开场白直接开跑。 */
+  const createTaskUnderDefaultProject = React.useCallback(
+    async (title: string, openingPrompt?: string): Promise<void> => {
+      if (!agentChannelId) {
+        toast.error('请先配置模型渠道')
+        return
+      }
+      setBusyQuick(true)
+      try {
+        let list = workspaces
+        if (!list.some((w) => w.slug === 'default')) {
+          list = await window.electronAPI.listAgentWorkspaces()
+          setWorkspaces(list)
+        }
+        const defaultWs = list.find((w) => w.slug === 'default') ?? list.find((w) => w.name === '默认项目')
+        if (!defaultWs) {
+          toast.error('找不到默认项目', { description: '请先在侧栏确认「默认项目」存在。' })
+          return
+        }
+        const taskTitle = title.trim() || '新任务'
+        const meta = await window.electronAPI.createAgentSession(
+          taskTitle,
+          agentChannelId,
+          defaultWs.id,
+          agentModelId ?? undefined,
+        )
+        setAgentSessions((prev) => [meta, ...prev.filter((s) => s.id !== meta.id)])
+        setCurrentWorkspaceId(defaultWs.id)
+        void window.electronAPI.updateSettings({ agentWorkspaceId: defaultWs.id }).catch(console.error)
+        toast.success(`已在默认项目下新建任务「${meta.title}」`)
+        openSession('agent', meta.id, meta.title)
+        setActiveView('conversations')
+        const kickoff = (openingPrompt || '').trim()
+        if (kickoff) {
+          window.setTimeout(() => {
+            void window.electronAPI.sendAgentMessage({
+              sessionId: meta.id,
+              userMessage: kickoff,
+              rawUserMessage: kickoff,
+              channelId: agentChannelId,
+              modelId: agentModelId || undefined,
+              workspaceId: defaultWs.id,
+              triggeredBy: 'user',
+            }).catch((error) => {
+              toast.error('任务已建，但开场消息发送失败', {
+                description: error instanceof Error ? error.message : String(error),
+              })
+            })
+          }, 400)
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error)
+        toast.error('创建任务失败', { description: msg })
+      } finally {
+        setBusyQuick(false)
+      }
+    },
+    [agentChannelId, agentModelId, openSession, setActiveView, setAgentSessions, setCurrentWorkspaceId, setWorkspaces, workspaces],
+  )
+
+  /** 说「新建任务/新建项目做某某」→ 默认项目下 createAgentSession。 */
+  const tryCreateTaskFromUtterance = React.useCallback(
+    async (text: string): Promise<boolean> => {
+      const intent = parseCreateTaskIntent(text)
+      if (!intent) return false
+      let name = intent.name
+      if (!name) {
+        const typed = window.prompt('新任务叫什么名字？', '')
+        name = typed?.trim() || ''
+      }
+      if (!name) {
+        toast.message('已取消', { description: '未提供任务名称，没有创建。' })
+        return true
+      }
+      await createTaskUnderDefaultProject(name, intent.raw)
+      return true
+    },
+    [createTaskUnderDefaultProject],
+  )
+
+  const handleBeforeAgentSend = React.useCallback(
+    async (text: string): Promise<boolean> => tryCreateTaskFromUtterance(text),
+    [tryCreateTaskFromUtterance],
+  )
+
+  const sendPrompt = React.useCallback(async (text: string): Promise<void> => {
+    if (!session || !agentChannelId || !hasAvailableModel) {
+      toast.error('工具台会话尚未就绪')
+      return
+    }
+    const trimmed = text.trim()
+    if (!trimmed) return
+    if (await tryCreateTaskFromUtterance(trimmed)) return
+    try {
+      await window.electronAPI.sendAgentMessage({
+        sessionId: session.id,
+        userMessage: trimmed,
+        rawUserMessage: trimmed,
+        channelId: agentChannelId,
+        modelId: agentModelId || undefined,
+        workspaceId: currentWorkspaceId || undefined,
+        triggeredBy: 'user',
+      })
+    } catch (error) {
+      toast.error('发送失败', {
+        description: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }, [agentChannelId, agentModelId, currentWorkspaceId, hasAvailableModel, session, tryCreateTaskFromUtterance])
+
+  // 进入会话区后再投递挂起的开场白
+  React.useEffect(() => {
+    if (mode !== 'session' || !pendingPrompt || !session || booting) return
+    const text = pendingPrompt
+    setPendingPrompt(null)
+    const timer = window.setTimeout(() => { void sendPrompt(text) }, 350)
+    return () => window.clearTimeout(timer)
+  }, [booting, mode, pendingPrompt, sendPrompt, session])
+
+  const enterSession = React.useCallback((prompt?: string) => {
+    if (prompt?.trim()) setPendingPrompt(prompt.trim())
+    persistMode('session')
+  }, [persistMode])
+
+  const handleChip = React.useCallback((chip: WorkbenchChip) => {
+    if (chip.action === 'voice_hint') {
+      openVoiceSettings()
+      enterSession()
+      toast.message('语音识别', { description: '请确认设置里已打开语音输入；对话区麦克风可听写。语音合成需在顶栏「语音」单独接入。' })
+      return
+    }
+    if (chip.action === 'create_project_prompt') {
+      const name = window.prompt('要在默认项目下新建的任务名称？', '')
+      if (name?.trim()) void createTaskUnderDefaultProject(name.trim(), `新建任务：${name.trim()}`)
+      return
+    }
+    if (chip.prompt) {
+      enterSession(chip.prompt)
+      return
+    }
+    enterSession()
+  }, [createTaskUnderDefaultProject, enterSession, openVoiceSettings])
+
+  const handleSelectProject = React.useCallback((id: string) => {
+    const found = workspaces.find((w) => w.id === id)
+    if (!found) return
+    setCurrentWorkspaceId(found.id)
+    void window.electronAPI.updateSettings({ agentWorkspaceId: found.id }).catch(console.error)
+    const projectSession = agentSessions.find((s) => s.workspaceId === found.id)
+    if (projectSession) {
+      openSession('agent', projectSession.id, projectSession.title)
+      setActiveView('conversations')
+    } else {
+      toast.success(`已切到项目「${found.name}」`)
+      enterSession(`当前项目已切换为「${found.name}」。请基于这个项目继续帮我做事。`)
+    }
+  }, [agentSessions, enterSession, openSession, setActiveView, setCurrentWorkspaceId, workspaces])
+
+  const [voiceTalkActive, setVoiceTalkActive] = React.useState(false)
+
+  React.useEffect(() => {
+    const onStatus = (event: Event): void => {
+      const detail = (event as CustomEvent<{ status?: string; sourceId?: string | null }>).detail
+      if (!detail?.status) return
+      if (detail.sourceId && detail.sourceId !== WORKBENCH_VOICE_INPUT_ID) {
+        setVoiceTalkActive(false)
+        return
+      }
+      setVoiceTalkActive(
+        detail.status === 'connecting'
+        || detail.status === 'recording'
+        || detail.status === 'stopping',
+      )
+    }
+    const onInsert = (event: Event): void => {
+      const detail = (event as CustomEvent<{ text?: string; targetInputId?: string | null }>).detail
+      if (!detail?.text) return
+      if (!isVoiceDictationTargetInput(WORKBENCH_VOICE_INPUT_ID, detail.targetInputId)) return
+      const text = detail.text.trim()
+      if (!text) return
+      event.preventDefault()
+      // 听写结果直接当工具台指令（含「新建任务」意图）
+      void (async () => {
+        if (await tryCreateTaskFromUtterance(text)) return
+        enterSession(text)
+      })()
+    }
+    window.addEventListener(VOICE_DICTATION_STATUS_EVENT, onStatus)
+    window.addEventListener(VOICE_DICTATION_INSERT_EVENT, onInsert)
+    return () => {
+      window.removeEventListener(VOICE_DICTATION_STATUS_EVENT, onStatus)
+      window.removeEventListener(VOICE_DICTATION_INSERT_EVENT, onInsert)
+    }
+  }, [enterSession, tryCreateTaskFromUtterance])
+
+  const toggleVoiceTalk = React.useCallback((): void => {
+    void (async () => {
+      try {
+        const settings = await window.electronAPI.getVoiceDictationSettings()
+        if (!settings.enabled) {
+          openVoiceSettings()
+          toast.info('请先打开语音识别', { description: '设置 → 语音输入。唤醒词免提后续接入；现在请点麦克风说话。' })
+          return
+        }
+        setLastFocusedVoiceInputId(WORKBENCH_VOICE_INPUT_ID)
+        await window.electronAPI.toggleVoiceDictation({ sourceInputId: WORKBENCH_VOICE_INPUT_ID })
+      } catch (error) {
+        toast.error('无法开始语音听写', {
+          description: error instanceof Error ? error.message : String(error),
+        })
+      }
+    })()
+  }, [openVoiceSettings])
+
+  // 芯片「点我说话」：直接开听写，而不是只进设置
+  const handleChipWithVoice = React.useCallback((chip: WorkbenchChip) => {
+    if (chip.action === 'voice_hint') {
+      toggleVoiceTalk()
+      return
+    }
+    handleChip(chip)
+  }, [handleChip, toggleVoiceTalk])
+
+  const orbState: RoyOrbState = !hasAvailableModel || !agentChannelId || bootError
+    ? 'offline'
+    : busyQuick || booting
+      ? 'thinking'
+      : 'ready'
+
+  const statusLine = orbState === 'offline'
+    ? '系统离线 · 请配置模型'
+    : booting
+      ? '系统启动中…'
+      : '系统在线 · 待命'
+
+  const detailLine = workspaceName
+    ? `项目「${workspaceName}」· 点球体或芯片开始`
+    : '点球体开聊，或用快捷芯片继续做事'
+
+  if (mode === 'stage') {
+    return (
+      <div className="relative flex h-full min-h-0 flex-col">
+        {(bootError || !hasAvailableModel || !agentChannelId) && (
+          <div className="absolute left-4 right-4 top-14 z-20 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12.5px] text-amber-900 dark:text-amber-100 ">
+            <AlertCircle size={14} className="mt-0.5 shrink-0" />
+            <div>
+              {bootError
+                || (!agentChannelId
+                  ? '还没选模型渠道：请到设置 → 模型渠道启用并选择一个模型。'
+                  : '当前没有可用模型：请到设置 → 模型渠道启用至少一个模型。')}
+            </div>
+          </div>
+        )}
+        <RoyWorkbenchStage
+          orbState={orbState}
+          skin={skin}
+          onSkinChange={handleSkinChange}
+          statusLine={statusLine}
+          detailLine={detailLine}
+          workspaceName={workspaceName}
+          modelLabel={modelLabel}
+          recentProjects={workspaces.map((w) => ({ id: w.id, name: w.name }))}
+          onOpenChat={() => enterSession()}
+          onChip={handleChipWithVoice}
+          onCommandSubmit={async (text) => {
+            const trimmed = text.trim()
+            if (!trimmed) return
+            if (await tryCreateTaskFromUtterance(trimmed)) return
+            enterSession(trimmed)
+          }}
+          onOpenFullSession={session ? openFullSession : undefined}
+          onSelectProject={handleSelectProject}
+          onOpenVoiceSettings={openVoiceSettings}
+          onToggleVoiceTalk={toggleVoiceTalk}
+          voiceTalkActive={voiceTalkActive}
+        />
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-4 py-2.5">
+        <button
+          type="button"
+          onClick={() => persistMode('stage')}
+          className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2.5 text-[12px] hover:bg-muted/50"
+        >
+          <ArrowLeft size={13} />
+          返回
+        </button>
+        <div className="min-w-0 flex-1">
+          <div className="text-[15px] font-medium text-foreground">Roy 对话</div>
+          <div className="text-[11.5px] text-muted-foreground">
+            完整 Agent 能力（工具 / 权限 / 流式）。点返回回到工具台舞台。
+          </div>
+        </div>
+        <button
+          type="button"
+          disabled={!session}
+          onClick={openFullSession}
+          className="inline-flex h-8 items-center gap-1 rounded-lg border border-border px-2.5 text-[12px] hover:bg-muted/50 disabled:opacity-40"
+        >
+          <ExternalLink size={12} />
+          在会话标签打开
+        </button>
+      </div>
+
+      {(bootError || !hasAvailableModel || !agentChannelId) && (
+        <div className="mx-4 mt-3 flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[12.5px] text-amber-900 dark:text-amber-100">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <div>
+            {bootError
+              || (!agentChannelId
+                ? '还没选模型渠道：请到设置 → 模型渠道启用并选择一个模型。'
+                : '当前没有可用模型：请到设置 → 模型渠道启用至少一个模型。')}
+          </div>
+        </div>
+      )}
+
+      <div className="min-h-0 flex-1">
+        {booting && (
+          <div className="flex h-full items-center justify-center gap-2 text-[13px] text-muted-foreground">
+            <Loader2 size={16} className="animate-spin" />
+            正在接通工具台会话…
+          </div>
+        )}
+        {!booting && session && (
+          <React.Suspense
+            fallback={(
+              <div className="flex h-full items-center justify-center text-[13px] text-muted-foreground">
+                加载 Agent 界面…
+              </div>
+            )}
+          >
+            <AgentView sessionId={session.id} embedded onBeforeSend={handleBeforeAgentSend} />
+          </React.Suspense>
+        )}
+      </div>
+    </div>
+  )
+}

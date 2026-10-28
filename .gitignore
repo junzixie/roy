@@ -1,0 +1,64 @@
+# 敏感配置
+.env
+.env.local
+*.env.local
+account.bin
+device-id
+
+# 构建产物
+dist/
+release/
+out/
+apps/electron/dist/
+apps/electron/out/
+apps/electron/release/
+
+# 依赖
+node_modules/
+.bun/
+
+# 日志
+*.log
+logs/
+
+# 临时文件
+.DS_Store
+Thumbs.db
+*.tmp
+*.temp
+.cache/
+
+# IDE
+.idea/
+.vscode/settings.json
+*.swp
+*.swo
+*.sublime-*
+
+# 测试覆盖率
+coverage/
+.nyc_output/
+
+# 系统
+.AppleDouble
+.LSOverride
+Icon
+._*
+
+# Backups (开发期临时备份目录,正式版不应包含)
+backups/
+
+# 根目录调试残留（base64 图片片段、构建日志、Windows 保留名占位文件）
+*.b64
+_tmp/
+nul
+激活.txt
+
+# 本地进度与审查笔记（记录开发过程，不进公开发布）
+改造进度.md
+审查报告.md
+
+# 构建脚本生成的二进制与打包产物（scripts/build-cli.ts、prepare-officecli.ts、esbuild 产出）
+apps/electron/resources/bin/
+apps/electron/resources/officecli/
+apps/electron/main.cjs

@@ -1,0 +1,126 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <!-- 深蓝星空背景 -->
+    <linearGradient id="bg" x1="0" y1="0" x2="0.35" y2="1">
+      <stop offset="0" stop-color="#1b2a5e"/>
+      <stop offset="0.55" stop-color="#16204a"/>
+      <stop offset="1" stop-color="#0d1330"/>
+    </linearGradient>
+    <!-- 背景光晕 -->
+    <radialGradient id="glow" cx="0.5" cy="0.42" r="0.55">
+      <stop offset="0" stop-color="#3b5bd0" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#3b5bd0" stop-opacity="0"/>
+    </radialGradient>
+    <!-- 松鼠毛色 -->
+    <linearGradient id="fur" x1="0.3" y1="0" x2="0.7" y2="1">
+      <stop offset="0" stop-color="#e8b184"/>
+      <stop offset="1" stop-color="#d49463"/>
+    </linearGradient>
+    <linearGradient id="furLight" x1="0.5" y1="0" x2="0.5" y2="1">
+      <stop offset="0" stop-color="#fdf0e2"/>
+      <stop offset="1" stop-color="#f5dcc4"/>
+    </linearGradient>
+    <!-- 尾巴 -->
+    <linearGradient id="tail" x1="0.2" y1="0" x2="0.9" y2="1">
+      <stop offset="0" stop-color="#e0a273"/>
+      <stop offset="1" stop-color="#c9824f"/>
+    </linearGradient>
+    <!-- 星星发光 -->
+    <radialGradient id="starGlow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#ffe89a" stop-opacity="0.95"/>
+      <stop offset="0.45" stop-color="#ffd45e" stop-opacity="0.5"/>
+      <stop offset="1" stop-color="#ffc93c" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="star" x1="0" y1="0" x2="0.6" y2="1">
+      <stop offset="0" stop-color="#fff6c9"/>
+      <stop offset="0.5" stop-color="#ffdc6b"/>
+      <stop offset="1" stop-color="#ffbf2e"/>
+    </linearGradient>
+    <clipPath id="round">
+      <rect x="16" y="16" width="480" height="480" rx="112" ry="112"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#round)">
+    <rect x="16" y="16" width="480" height="480" rx="112" fill="url(#bg)"/>
+    <rect x="16" y="16" width="480" height="480" fill="url(#glow)"/>
+
+    <!-- 星星点 -->
+    <g fill="#ffffff">
+      <circle cx="96" cy="112" r="3.4" opacity="0.85"/>
+      <circle cx="150" cy="70" r="2.2" opacity="0.6"/>
+      <circle cx="404" cy="132" r="3" opacity="0.75"/>
+      <circle cx="440" cy="88" r="2" opacity="0.5"/>
+      <circle cx="72" cy="330" r="2.6" opacity="0.55"/>
+      <circle cx="428" cy="330" r="2.4" opacity="0.5"/>
+      <circle cx="248" cy="58" r="2" opacity="0.45"/>
+      <circle cx="360" cy="56" r="2.6" opacity="0.55"/>
+      <circle cx="60" cy="220" r="2" opacity="0.4"/>
+      <circle cx="452" cy="232" r="2.2" opacity="0.45"/>
+    </g>
+
+    <!-- 大尾巴（在身后） -->
+    <path d="M330 400c76-10 118-64 108-134-8-58-52-96-104-92-30 2-54 20-66 44 26-10 54-10 78 4 34 20 52 58 44 96-8 40-38 68-78 74-10 2-14 6-14 8h32z"
+          fill="url(#tail)"/>
+    <path d="M356 392c56-16 84-58 76-112-6-44-38-72-80-70 22 10 40 30 48 56 12 40-4 82-44 110-8 6-6 16 0 16z"
+          fill="#c9824f" opacity="0.45"/>
+
+    <!-- 身体 -->
+    <ellipse cx="248" cy="360" rx="98" ry="96" fill="url(#fur)"/>
+    <!-- 肚皮 -->
+    <ellipse cx="248" cy="376" rx="62" ry="70" fill="url(#furLight)"/>
+
+    <!-- 手臂（抱星星） -->
+    <ellipse cx="196" cy="322" rx="34" ry="26" transform="rotate(-24 196 322)" fill="url(#fur)"/>
+    <ellipse cx="300" cy="322" rx="34" ry="26" transform="rotate(24 300 322)" fill="url(#fur)"/>
+
+    <!-- 星星 -->
+    <circle cx="248" cy="312" r="86" fill="url(#starGlow)"/>
+    <path d="M248 246l19.8 40.1 44.3 6.4-32 31.2 7.6 44.1-39.7-20.9-39.7 20.9 7.6-44.1-32-31.2 44.3-6.4z"
+          fill="url(#star)"/>
+    <path d="M248 262l14.4 29.2 32.3 4.7-23.4 22.8 5.6 32.2-28.9-15.2-28.9 15.2 5.6-32.2-23.4-22.8 32.3-4.7z"
+          fill="#fff6c9" opacity="0.55"/>
+
+    <!-- 手盖在星星上 -->
+    <ellipse cx="203" cy="316" rx="26" ry="20" transform="rotate(-18 203 316)" fill="url(#furLight)"/>
+    <ellipse cx="293" cy="316" rx="26" ry="20" transform="rotate(18 293 316)" fill="url(#furLight)"/>
+
+    <!-- 耳朵 -->
+    <ellipse cx="188" cy="184" rx="34" ry="38" transform="rotate(-16 188 184)" fill="url(#fur)"/>
+    <ellipse cx="308" cy="184" rx="34" ry="38" transform="rotate(16 308 184)" fill="url(#fur)"/>
+    <ellipse cx="190" cy="188" rx="18" ry="21" transform="rotate(-16 190 188)" fill="#f7cdb2"/>
+    <ellipse cx="306" cy="188" rx="18" ry="21" transform="rotate(16 306 188)" fill="#f7cdb2"/>
+
+    <!-- 头 -->
+    <ellipse cx="248" cy="228" rx="96" ry="88" fill="url(#fur)"/>
+    <!-- 脸颊浅色 -->
+    <ellipse cx="248" cy="252" rx="66" ry="54" fill="url(#furLight)"/>
+
+    <!-- 眼睛 -->
+    <ellipse cx="212" cy="216" rx="15" ry="17" fill="#2b1d17"/>
+    <ellipse cx="284" cy="216" rx="15" ry="17" fill="#2b1d17"/>
+    <circle cx="207" cy="209" r="5.2" fill="#ffffff" opacity="0.95"/>
+    <circle cx="279" cy="209" r="5.2" fill="#ffffff" opacity="0.95"/>
+    <circle cx="217" cy="224" r="2.6" fill="#ffffff" opacity="0.7"/>
+    <circle cx="289" cy="224" r="2.6" fill="#ffffff" opacity="0.7"/>
+
+    <!-- 腮红 -->
+    <ellipse cx="176" cy="248" rx="16" ry="10" fill="#f09a8a" opacity="0.5"/>
+    <ellipse cx="320" cy="248" rx="16" ry="10" fill="#f09a8a" opacity="0.5"/>
+
+    <!-- 鼻子和嘴 -->
+    <path d="M241 246h14c3 0 5 2 5 5s-2 5-5 5h-14c-3 0-5-2-5-5s2-5 5-5z" fill="#8a5a44" opacity="0.9"/>
+    <ellipse cx="248" cy="250" rx="7" ry="5.5" fill="#7a4a36"/>
+    <path d="M248 256v6M248 262c-2 6-9 8-14 4M248 262c2 6 9 8 14 4"
+          stroke="#7a4a36" stroke-width="3.4" stroke-linecap="round" fill="none"/>
+
+    <!-- 门牙 -->
+    <rect x="240" y="268" width="7" height="11" rx="2.4" fill="#ffffff"/>
+    <rect x="249" y="268" width="7" height="11" rx="2.4" fill="#ffffff"/>
+
+
+  </g>
+
+  <!-- 内描边，让图标在浅色背景上有边界 -->
+  <rect x="16" y="16" width="480" height="480" rx="112" fill="none" stroke="#0a0f24" stroke-opacity="0.35" stroke-width="2"/>
+</svg>

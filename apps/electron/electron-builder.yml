@@ -1,0 +1,107 @@
+appId: com.roy.agent
+productName: Roy
+copyright: Copyright © 2026 Roy
+
+directories:
+  output: out
+  buildResources: resources
+
+files:
+  - dist/**/*
+  - '!dist/resources/**'
+  - dist/resources/icon.png
+  - package.json
+  - node_modules/**/*
+  - '!node_modules/@roy/**'
+  - '!node_modules/electron/**'
+  - '!node_modules/electron-builder/**'
+  - '!node_modules/electronmon/**'
+  - '!node_modules/@electron/**'
+  - '!node_modules/@electron-builder/**'
+  - '!node_modules/@napi-rs/**'
+  - '!node_modules/web-streams-polyfill/**'
+  - '!node_modules/@earendil-works/*/examples/**'
+  - '!node_modules/@earendil-works/*/docs/**'
+  - '!node_modules/@earendil-works/**/*.map'
+  - '!**/*.{iml,hprof,orig,pyc,pyo,rbc,swp,csproj,sln,suo,xproj,cc,d.ts,mk,a,o,forge-meta,pdb}'
+  - '!**/._*'
+  - '!**/electron-builder.{yaml,yml,json,json5,toml,ts}'
+  - '!**/{.git,.hg,.svn,CVS,RCS,SCCS,__pycache__,.DS_Store,thumbs.db,.gitignore,.gitkeep,.gitattributes,.npmignore,.idea,.vs,.flowconfig,.jshintrc,.eslintrc,.circleci,.yarn-integrity,.yarn-metadata.json,yarn-error.log,yarn.lock,package-lock.json,npm-debug.log,appveyor.yml,.travis.yml,circle.yml,.nyc_output,.husky,.github,electron-builder.env}'
+  - '!.yarn{,/**/*}'
+  - '!.editorconfig'
+  - '!.yarnrc.yml'
+
+asar: true
+
+# 静默更新源：OA 服务器 nginx 的 /roy-update/（/data/roy-update），https://www.zajx.top。
+# 发版：bun run dist:win 后执行 bun scripts/publish-update.mjs 上传 latest.yml + 安装包 + blockmap。
+publish:
+  - provider: generic
+    # 域名 agares.cn 备案前直连 IP（自签证书由 Roy 内置固定，见 pinned-certificates.ts）
+    url: https://120.26.161.126:9001/win
+    channel: latest
+
+# node-pty 用自带的 prebuilds 二进制（out-v37 也是这么打的）。
+# 本机没有 Visual Studio，重编译会直接失败；关掉它避免 node-gyp 报错。
+npmRebuild: false
+
+asarUnpack:
+  - node_modules/node-pty/**
+  - node_modules/sharp/**
+  - node_modules/@img/**
+  - node_modules/quickjs-wasi/**
+  - node_modules/@silvia-odwyer/**
+
+extraResources:
+  - from: dist/resources
+    to: .
+    filter:
+      - '**/*'
+      - '!icon.png'
+      - '!icon.ico'
+      - '!icon.icns'
+      - '!icon.svg'
+      - '!icon-roy.png'
+      - '!icon-roy.svg'
+      - '!generate-icons.sh'
+      - '!entitlements.mac.plist'
+      - '!linux/**'
+  - from: dist/resources/icon.png
+    to: icon.png
+  - from: dist/resources/icon.ico
+    to: icon.ico
+
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+  icon: resources/icon.ico
+  artifactName: ${productName}-${version}-setup.${ext}
+
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: Roy
+  include: resources/installer-progress.nsh
+
+mac:
+  target:
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+  icon: resources/icon.icns
+  category: public.app-category.productivity
+  hardenedRuntime: true
+  entitlements: resources/entitlements.mac.plist
+
+linux:
+  target:
+    - AppImage
+  icon: resources/linux
+  category: Utility

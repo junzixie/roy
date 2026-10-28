@@ -1,0 +1,21 @@
+diff --git a/dist/utils/retry.js b/dist/utils/retry.js
+index a0e9b83..57279f7 100644
+--- a/dist/utils/retry.js
++++ b/dist/utils/retry.js
+@@ -70,6 +70,16 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
+     // "stream ended without ..." and "Anthropic stream ended before message_stop"
+     // (#4433); Bedrock/Smithy can throw an HTTP/2 no-response error (#3594).
+     "ended without",
++    // Roy：部分 OpenAI 兼容网关的终止事件报错里不带 "response"。
++    "stream ended before (?:a )?terminal(?: response)? event",
++    // Roy：HTTP chunked / SSE 代理在响应体没传完时就断开，或把半截 JSON 交给解析器。
++    "unexpected non-whitespace character after JSON",
++    "peer closed connection",
++    "incomplete chunked read",
++    "premature close",
++    "ECONNRESET",
++    // Roy：浏览器 / undici 的写法：`TypeError: Failed to fetch`。
++    "failed to fetch",
+     "stream ended before message_stop",
+     "stream ended before a terminal response event",
+     "http2 request did not get a response",

@@ -1,0 +1,14 @@
+diff --git a/package.json b/package.json
+index 90a1986..25c764e 100644
+--- a/package.json
++++ b/package.json
+@@ -14,7 +14,8 @@
+   "exports": {
+     ".": {
+       "types": "./dist/index.d.ts",
+-      "import": "./dist/index.js"
++      "import": "./dist/index.js",
++      "require": "./dist/index.js"
+     },
+     "./rpc-entry": {
+       "import": "./dist/bundle/rpc-entry.js"

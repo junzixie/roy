@@ -1,0 +1,40 @@
+diff --git a/dist/utils/retry.js b/dist/utils/retry.js
+index d1da13a..3770a87 100644
+--- a/dist/utils/retry.js
++++ b/dist/utils/retry.js
+@@ -19,6 +19,18 @@ const NON_RETRYABLE_PROVIDER_LIMIT_ERROR_PATTERN = buildProviderErrorPattern([
+     // Sign in with ChatGPT: the subscription's shared usage limit, which resets
+     // after hours rather than seconds.
+     "subscription_sharing_usage_limit_exceeded",
++    // Roy：国内厂商与中转站的余额 / 额度 / 欠费提示（常以 429 返回，不是临时限流）。
++    "insufficient.?balance",
++    "insufficient.?credits?",
++    "exceeded your current quota",
++    "余额不足",
++    "额度不足",
++    "额度已用",
++    "额度用尽",
++    "额度已耗尽",
++    "欠费",
++    "请充值",
++    "套餐.{0,8}(?:用完|用尽|耗尽|已到期|已过期)",
+ ]);
+ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
+     // Generic provider load, HTTP status, and server-side transient failures.
+@@ -74,6 +86,16 @@ const RETRYABLE_PROVIDER_ERROR_PATTERN = buildProviderErrorPattern([
+     // "stream ended without ..." and "Anthropic stream ended before message_stop"
+     // (#4433); Bedrock/Smithy can throw an HTTP/2 no-response error (#3594).
+     "ended without",
++    // Roy：部分 OpenAI 兼容网关的终止事件报错里不带 "response"。
++    "stream ended before (?:a )?terminal(?: response)? event",
++    // Roy：HTTP chunked / SSE 代理在响应体没传完时就断开，或把半截 JSON 交给解析器。
++    "unexpected non-whitespace character after JSON",
++    "peer closed connection",
++    "incomplete chunked read",
++    "premature close",
++    "ECONNRESET",
++    // Roy：浏览器 / undici 的写法：`TypeError: Failed to fetch`。
++    "failed to fetch",
+     "stream ended before message_stop",
+     "stream ended before a terminal response event",
+     "http2 request did not get a response",

@@ -1,0 +1,69 @@
+[
+  {
+    "id": "sequential-thinking",
+    "name": "分步思考",
+    "description": "复杂问题拆成步骤一步步推理",
+    "group": "思考与记忆",
+    "license": "MIT",
+    "author": "MCP 官方",
+    "server": {
+      "type": "stdio",
+      "command": "${ROY_NODE}",
+      "args": [
+        "${ROY_MCP}/modelcontextprotocol__server-sequential-thinking/dist\\index.roy.mjs"
+      ]
+    },
+    "needs": [],
+    "note": "",
+    "origin": "npm",
+    "skill": null,
+    "tools": 1,
+    "featured": true
+  },
+  {
+    "id": "memory",
+    "name": "长期记忆",
+    "description": "用知识图谱记住人物、项目和它们的关系",
+    "group": "思考与记忆",
+    "license": "MIT",
+    "author": "MCP 官方",
+    "server": {
+      "type": "stdio",
+      "command": "${ROY_NODE}",
+      "args": [
+        "${ROY_MCP}/modelcontextprotocol__server-memory/dist\\index.roy.mjs"
+      ],
+      "env": {
+        "MEMORY_FILE_PATH": "${ROY_DATA}/mcp-memory.jsonl"
+      }
+    },
+    "needs": [],
+    "note": "按需安装启用；会写入本机知识图谱，不保存敏感信息。",
+    "origin": "npm",
+    "skill": null,
+    "tools": 9,
+    "featured": true
+  },
+  {
+    "id": "filesystem",
+    "name": "文件系统",
+    "description": "读写当前项目文件夹里的文件",
+    "group": "文件与办公",
+    "license": "MIT",
+    "author": "MCP 官方",
+    "server": {
+      "type": "stdio",
+      "command": "${ROY_NODE}",
+      "args": [
+        "${ROY_MCP}/modelcontextprotocol__server-filesystem/dist\\index.roy.mjs",
+        "${WORKSPACE}"
+      ]
+    },
+    "needs": [],
+    "note": "只能访问当前项目文件夹",
+    "origin": "npm",
+    "skill": null,
+    "tools": 14,
+    "featured": true
+  }
+]

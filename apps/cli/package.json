@@ -1,0 +1,10 @@
+{
+  "name": "@roy/cli",
+  "version": "0.1.0",
+  "description": "roy 命令行工具",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "roy": "./src/index.ts"
+  }
+}

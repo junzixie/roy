@@ -1,0 +1,459 @@
+/**
+ * Roy 中央球 — 对齐贾维斯 OS Voice Space（Canvas 2D + rAF）动效算法：
+ * makeParticles / drawBackdropGeometry / drawCoreGlow / drawParticles / 安静呼吸能量。
+ * 参考：E:\AIproject\01-jarvis-os\app\renderer\assets\voice-space\voice-space-view.js
+ * 视觉亦对照 AIWorkstation jarvis-ball（密度感 / 光晕），实现仍走 Canvas 2D，不叠 WebGL 双壳。
+ * 配色挂钩 Roy 皮肤；拖拽视差 + 点击开聊。
+ */
+import * as React from 'react'
+import { cn } from '@/lib/utils'
+import type { RoyWorkbenchSkin } from '@/lib/roy-workbench-prefs'
+
+export type RoyOrbState = 'idle' | 'ready' | 'thinking' | 'busy' | 'offline'
+
+type Particle = {
+  x: number
+  y: number
+  z: number
+  phase: number
+  phaseY: number
+  floatRate: number
+  drift: number
+  size: number
+}
+
+type Dust = { x: number; y: number; depth: number; phase: number }
+type Projected = { x: number; y: number; size: number; depth: number }
+
+const TARGET_FRAME_INTERVAL_MS = 28
+const MAX_DPR = 2
+const MAX_CANVAS_PIXELS = 4_200_000
+const FIXED_PITCH = -0.16
+
+function clamp(v: number, a: number, b: number): number {
+  return Math.max(a, Math.min(b, v))
+}
+
+/** Voice Space STATE_CONFIG.energy 映射到 Roy 助理态 */
+function energyFor(state: RoyOrbState): number {
+  switch (state) {
+    case 'thinking':
+      return 0.52
+    case 'busy':
+      return 0.9
+    case 'offline':
+      return 0.07
+    case 'idle':
+      return 0.27
+    default:
+      return 0.38 // ready ≈ listening
+  }
+}
+
+function paletteRgb(skin: RoyWorkbenchSkin, light: boolean): [number, number, number] {
+  switch (skin) {
+    case 'aivy':
+      // 贴近 Voice Space listening / connected 青调
+      return light ? [20, 184, 166] : [101, 230, 255]
+    case 'mineral':
+      return light ? [45, 95, 136] : [114, 224, 255]
+    case 'ink':
+      return light ? [51, 65, 85] : [226, 232, 240]
+    default:
+      // aurora — 对齐 AIWorkstation 默认青蓝高光
+      return light ? [37, 99, 235] : [116, 185, 255]
+  }
+}
+
+function rgba(rgb: [number, number, number], a: number): string {
+  return `rgba(${rgb[0]}, ${rgb[1]}, ${rgb[2]}, ${clamp(a, 0, 1)})`
+}
+
+function makeParticles(width: number, height: number, dpr: number): {
+  particles: Particle[]
+  projected: Projected[]
+  stardust: Dust[]
+} {
+  const area = Math.max(1, width * height)
+  const limitedCpu =
+    typeof navigator !== 'undefined' && Number(navigator.hardwareConcurrency || 8) <= 4
+  const performanceScale = (limitedCpu ? 0.55 : 0.7) * (dpr > 1.25 ? 0.75 : 1)
+  // Voice Space：点数随面积，120–360
+  const count = clamp(Math.round((area / 5200 + 180) * performanceScale * 0.55), 120, 360)
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5))
+  const particles = Array.from({ length: count }, (_, index) => {
+    const ratio = (index + 0.5) / count
+    const vertical = 1 - ratio * 2
+    const ring = Math.sqrt(Math.max(0, 1 - vertical * vertical))
+    const angle = index * goldenAngle
+    const radiusJitter = 0.91 + (((index * 97) % 101) / 100) * 0.18
+    return {
+      x: Math.cos(angle) * ring * radiusJitter,
+      y: vertical * radiusJitter,
+      z: Math.sin(angle) * ring * radiusJitter,
+      phase: (index * 0.754877666) % (Math.PI * 2),
+      phaseY: (index * 1.324717957) % (Math.PI * 2),
+      floatRate: 0.07 + (((index * 43) % 71) / 70) * 0.12,
+      drift: 0.036 + (((index * 61) % 53) / 52) * 0.064,
+      size: 0.56 + ((index * 37) % 17) / 18,
+    }
+  })
+  const projected = particles.map(() => ({ x: 0, y: 0, size: 1, depth: 0 }))
+  const dustCount = clamp(Math.round(area / 22000), 20, 80)
+  const stardust = Array.from({ length: dustCount }, (_, index) => ({
+    x: ((index * 73) % 997) / 997,
+    y: ((index * 193) % 991) / 991,
+    depth: 0.18 + (((index * 47) % 83) / 83) * 0.82,
+    phase: (((index * 29) % 101) / 101) * Math.PI * 2,
+  }))
+  return { particles, projected, stardust }
+}
+
+function drawBackdropGeometry(
+  ctx: CanvasRenderingContext2D,
+  width: number,
+  height: number,
+  centerX: number,
+  centerY: number,
+  baseRadius: number,
+  color: [number, number, number],
+  energy: number,
+  time: number,
+  stardust: Dust[],
+): void {
+  const motionTime = time * 0.001
+  for (const dust of stardust) {
+    const drift = Math.sin(motionTime * (0.035 + dust.depth * 0.025) + dust.phase) * 7 * dust.depth
+    const x = dust.x * width + drift
+    const y = dust.y * height + Math.cos(motionTime * 0.04 + dust.phase) * 4
+    ctx.beginPath()
+    ctx.arc(x, y, 0.28 + dust.depth * 0.62, 0, Math.PI * 2)
+    ctx.fillStyle = rgba(color, 0.025 + dust.depth * 0.09)
+    ctx.fill()
+  }
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.rect(-1, -1, width + 2, height + 2)
+  ctx.arc(centerX, centerY, baseRadius * 1.62, 0, Math.PI * 2, true)
+  ctx.clip('evenodd')
+  ctx.lineWidth = 0.65
+  for (let ring = 2; ring <= 7; ring += 1) {
+    const radius = baseRadius * (0.88 + ring * 0.41)
+    const start = time * 0.000025 * (ring % 2 ? 1 : -1) + ring * 0.34
+    ctx.beginPath()
+    ctx.ellipse(
+      centerX,
+      centerY,
+      radius,
+      radius * (0.25 + ring * 0.035),
+      -0.13,
+      start,
+      start + Math.PI * (0.7 + ring * 0.11),
+    )
+    ctx.strokeStyle = rgba(color, 0.022 + energy * 0.028)
+    ctx.stroke()
+  }
+  ctx.restore()
+}
+
+function drawCoreGlow(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  baseRadius: number,
+  color: [number, number, number],
+  energy: number,
+): void {
+  const glow = ctx.createRadialGradient(centerX, centerY, 0, centerX, centerY, baseRadius * 1.8)
+  glow.addColorStop(0, rgba(color, 0.12 + energy * 0.14))
+  glow.addColorStop(0.42, rgba(color, 0.045 + energy * 0.055))
+  glow.addColorStop(0.78, rgba(color, 0.012 + energy * 0.018))
+  glow.addColorStop(1, rgba(color, 0))
+  ctx.fillStyle = glow
+  ctx.beginPath()
+  ctx.arc(centerX, centerY, baseRadius * 1.8, 0, Math.PI * 2)
+  ctx.fill()
+}
+
+function drawParticles(
+  ctx: CanvasRenderingContext2D,
+  centerX: number,
+  centerY: number,
+  baseRadius: number,
+  color: [number, number, number],
+  energy: number,
+  time: number,
+  staticFrame: boolean,
+  particles: Particle[],
+  projected: Projected[],
+  tiltX: number,
+  tiltY: number,
+): void {
+  if (!particles.length) return
+  const motionTime = staticFrame ? 0 : time * 0.001
+  const pitch = FIXED_PITCH + tiltY * 0.35
+  const yaw = tiltX * 0.5
+  const cosPitch = Math.cos(pitch)
+  const sinPitch = Math.sin(pitch)
+  const cosYaw = Math.cos(yaw)
+  const sinYaw = Math.sin(yaw)
+  const breath = 1 + Math.sin(motionTime * 0.42) * (0.035 + energy * 0.035)
+  const sphereRadius = baseRadius * (1.31 + energy * 0.095)
+
+  for (let index = 0; index < particles.length; index += 1) {
+    const particle = particles[index]
+    const floatPhase = motionTime * particle.floatRate + particle.phase
+    const floatPhaseY = motionTime * (particle.floatRate * 0.83) + particle.phaseY
+    const audioRipple = Math.sin(motionTime * 0.72 + particle.phase) * energy * 0.065
+    const reactive = breath + audioRipple
+    let x1 = particle.x * reactive + Math.sin(floatPhase) * particle.drift
+    let y1 = particle.y * reactive + Math.cos(floatPhaseY) * particle.drift
+    let z1 = particle.z * reactive + Math.sin(floatPhaseY + particle.phase * 0.37) * particle.drift
+    // 可选视差：先 yaw 再 pitch（静止时 yaw≈0，与 Voice Space 一致）
+    if (Math.abs(yaw) > 1e-4) {
+      const xYaw = x1 * cosYaw + z1 * sinYaw
+      const zYaw = -x1 * sinYaw + z1 * cosYaw
+      x1 = xYaw
+      z1 = zYaw
+    }
+    const y2 = y1 * cosPitch - z1 * sinPitch
+    const z2 = y1 * sinPitch + z1 * cosPitch
+    const perspective = 2.65 / (2.65 - z2)
+    const point = projected[index]
+    point.x = centerX + x1 * sphereRadius * perspective
+    point.y = centerY + y2 * sphereRadius * perspective
+    point.depth = clamp((z2 + 1) * 0.5, 0, 1)
+    point.size = particle.size * (0.64 + perspective * 0.7 + energy * 0.34)
+  }
+
+  for (let band = 0; band < 4; band += 1) {
+    ctx.beginPath()
+    for (const point of projected) {
+      const pointBand = Math.min(3, Math.floor(point.depth * 4))
+      if (pointBand !== band) continue
+      ctx.moveTo(point.x + point.size, point.y)
+      ctx.arc(point.x, point.y, point.size, 0, Math.PI * 2)
+    }
+    ctx.fillStyle = rgba(color, 0.28 + band * 0.17 + energy * 0.14)
+    ctx.fill()
+  }
+}
+
+export function RoyWorkbenchOrb({
+  state = 'ready',
+  skin = 'aurora',
+  label,
+  sublabel,
+  onActivate,
+  className,
+}: {
+  state?: RoyOrbState
+  skin?: RoyWorkbenchSkin
+  label: string
+  sublabel?: string
+  onActivate: () => void
+  className?: string
+}): React.ReactElement {
+  const canvasRef = React.useRef<HTMLCanvasElement>(null)
+  const wrapRef = React.useRef<HTMLButtonElement>(null)
+  const particlesRef = React.useRef<Particle[]>([])
+  const projectedRef = React.useRef<Projected[]>([])
+  const dustRef = React.useRef<Dust[]>([])
+  const levelRef = React.useRef(energyFor(state))
+  const tiltRef = React.useRef({ x: 0, y: 0, tx: 0, ty: 0 })
+  const dragRef = React.useRef<{ x: number; y: number; dragging: boolean; moved: boolean }>({
+    x: 0,
+    y: 0,
+    dragging: false,
+    moved: false,
+  })
+  const sizeRef = React.useRef({ w: 0, h: 0, dpr: 1 })
+
+  const reduced = React.useMemo(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+    [],
+  )
+  const light = React.useMemo(() => {
+    if (typeof document === 'undefined') return true
+    return !document.documentElement.classList.contains('dark')
+  }, [])
+
+  React.useEffect(() => {
+    const canvas = canvasRef.current
+    const wrap = wrapRef.current
+    if (!canvas || !wrap) return
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    let alive = true
+    let raf = 0
+    let lastFrame = 0
+    let fpsSkip = 0
+    const color = paletteRgb(skin, light)
+    const offlineColor: [number, number, number] = light ? [111, 135, 149] : [100, 116, 139]
+
+    const rebuild = (w: number, h: number, dpr: number): void => {
+      const pack = makeParticles(w, h, dpr)
+      particlesRef.current = pack.particles
+      projectedRef.current = pack.projected
+      dustRef.current = pack.stardust
+      sizeRef.current = { w, h, dpr }
+    }
+
+    const resize = (): void => {
+      const rect = wrap.getBoundingClientRect()
+      const cssW = Math.max(1, Math.round(rect.width))
+      const cssH = Math.max(1, Math.round(rect.height))
+      const pixelBudgetDpr = Math.sqrt(MAX_CANVAS_PIXELS / Math.max(1, cssW * cssH))
+      const dpr = clamp(Math.min(window.devicePixelRatio || 1, MAX_DPR, pixelBudgetDpr), 0.25, MAX_DPR)
+      const pxW = Math.max(1, Math.round(cssW * dpr))
+      const pxH = Math.max(1, Math.round(cssH * dpr))
+      if (canvas.width !== pxW || canvas.height !== pxH) {
+        canvas.width = pxW
+        canvas.height = pxH
+        canvas.style.width = `${cssW}px`
+        canvas.style.height = `${cssH}px`
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+      }
+      if (sizeRef.current.w !== cssW || sizeRef.current.h !== cssH || sizeRef.current.dpr !== dpr) {
+        rebuild(cssW, cssH, dpr)
+      }
+    }
+    resize()
+    const ro = typeof ResizeObserver !== 'undefined' ? new ResizeObserver(resize) : null
+    ro?.observe(wrap)
+
+    const drawFrame = (time: number, staticFrame: boolean): void => {
+      const w = sizeRef.current.w || canvas.clientWidth || 320
+      const h = sizeRef.current.h || canvas.clientHeight || 320
+      const cx = w * 0.5
+      const cy = h * 0.5
+      const baseEnergy = energyFor(state)
+      // Voice Space：无实时 PCM 时约 15s 一轮安静呼吸
+      const fallbackPulse = baseEnergy * (0.72 + Math.sin(time * 0.00042) * 0.12)
+      const targetLevel = fallbackPulse
+      const easing = targetLevel > levelRef.current ? 0.38 : 0.12
+      levelRef.current += (targetLevel - levelRef.current) * easing
+      const visualEnergy = clamp(levelRef.current, 0.04, 1)
+      // Voice Space：球半径 92–205（相对视口）
+      const baseRadius = clamp(Math.min(w, h) * 0.225, 92, 205)
+      const tint = state === 'offline' ? offlineColor : color
+
+      // 视差阻尼回正（非拖拽时）
+      const tilt = tiltRef.current
+      if (!dragRef.current.dragging) {
+        tilt.tx *= 0.92
+        tilt.ty *= 0.92
+        if (Math.abs(tilt.tx) < 0.001) tilt.tx = 0
+        if (Math.abs(tilt.ty) < 0.001) tilt.ty = 0
+      }
+      tilt.x += (tilt.tx - tilt.x) * 0.18
+      tilt.y += (tilt.ty - tilt.y) * 0.18
+
+      ctx.clearRect(0, 0, w, h)
+      drawBackdropGeometry(ctx, w, h, cx, cy, baseRadius, tint, visualEnergy, time, dustRef.current)
+      drawCoreGlow(ctx, cx, cy, baseRadius, tint, visualEnergy)
+      drawParticles(
+        ctx,
+        cx,
+        cy,
+        baseRadius,
+        tint,
+        visualEnergy,
+        time,
+        staticFrame || reduced,
+        particlesRef.current,
+        projectedRef.current,
+        tilt.x,
+        tilt.y,
+      )
+    }
+
+    const loop = (time: number): void => {
+      if (!alive) return
+      raf = 0
+      if (reduced) {
+        drawFrame(time, true)
+        return
+      }
+      // Voice Space v0.2.4: ~30fps
+      fpsSkip += 1
+      if (fpsSkip % 2 === 1) {
+        raf = requestAnimationFrame(loop)
+        return
+      }
+      if (!lastFrame || time - lastFrame >= TARGET_FRAME_INTERVAL_MS) {
+        lastFrame = time
+        drawFrame(time, false)
+      }
+      raf = requestAnimationFrame(loop)
+    }
+
+    if (reduced) {
+      drawFrame(performance.now(), true)
+    } else {
+      raf = requestAnimationFrame(loop)
+    }
+
+    return () => {
+      alive = false
+      if (raf) cancelAnimationFrame(raf)
+      ro?.disconnect()
+    }
+  }, [light, reduced, skin, state])
+
+  const onPointerDown = (e: React.PointerEvent): void => {
+    ;(e.target as HTMLElement).setPointerCapture?.(e.pointerId)
+    dragRef.current = { x: e.clientX, y: e.clientY, dragging: true, moved: false }
+  }
+  const onPointerMove = (e: React.PointerEvent): void => {
+    if (!dragRef.current.dragging) return
+    const dx = e.clientX - dragRef.current.x
+    const dy = e.clientY - dragRef.current.y
+    if (Math.abs(dx) + Math.abs(dy) > 3) dragRef.current.moved = true
+    // 对照 AIWorkstation orbit：拖拽视差，不整球空转
+    tiltRef.current.tx = clamp(tiltRef.current.tx + dx * 0.006, -1.2, 1.2)
+    tiltRef.current.ty = clamp(tiltRef.current.ty - dy * 0.006, -0.9, 0.9)
+    dragRef.current.x = e.clientX
+    dragRef.current.y = e.clientY
+  }
+  const endDrag = (e: React.PointerEvent): void => {
+    const wasDrag = dragRef.current.moved
+    dragRef.current.dragging = false
+    if (!wasDrag) onActivate()
+    try {
+      ;(e.target as HTMLElement).releasePointerCapture?.(e.pointerId)
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return (
+    <div className={cn('relative flex flex-col items-center gap-3', className)}>
+      <button
+        ref={wrapRef}
+        type="button"
+        aria-label={`${label}，点击开始对话`}
+        className="group relative h-[min(72vw,420px)] w-[min(72vw,420px)] cursor-grab rounded-full active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+        onPointerDown={onPointerDown}
+        onPointerMove={onPointerMove}
+        onPointerUp={endDrag}
+        onPointerCancel={endDrag}
+      >
+        <span
+          className="pointer-events-none absolute inset-[8%] rounded-full opacity-80 blur-3xl transition group-hover:opacity-100"
+          style={{
+            background: `radial-gradient(circle, ${rgba(paletteRgb(skin, light), 0.32)} 0%, transparent 70%)`,
+          }}
+        />
+        <canvas ref={canvasRef} className="pointer-events-none relative z-10 h-full w-full" />
+      </button>
+      <div className="text-center">
+        <div className="text-[15px] font-medium tracking-wide text-foreground">{label}</div>
+        {sublabel ? <div className="mt-0.5 max-w-sm text-[12px] text-muted-foreground">{sublabel}</div> : null}
+        <div className="mt-1 text-[11px] text-muted-foreground/75">拖拽视差 · 点一下开聊</div>
+      </div>
+    </div>
+  )
+}
