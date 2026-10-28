@@ -40,9 +40,15 @@ import type {
 } from '@roy/shared'
 import {
   calculatePiAutoCompactionReserveTokens,
+  calculatePiAutoCompactionThresholdTokens,
+  calculatePiCompactionKeepRecentTokens,
+  describeCompactionResidual,
+  isCompactionResidualTooHigh,
   normalizeCompactionPercent,
   inferReasoningTransport,
   isCodexFastModeSupportedModel,
+  PI_COMPACTION_KEEP_RECENT_TOKENS,
+  PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
   resolveReasoningProfile,
   createSkillActivationFromPath,
 } from '@roy/shared'
@@ -76,6 +82,8 @@ import { ProjectInstructionScopeController } from './pi-project-instruction-scop
 import type { ProjectInstructionSource } from '../project-instruction-resolver'
 import { createCodexFastModeExtension, withCodexFastModeServiceTier } from './pi-codex-request-settings'
 import { createDeepSeekReasoningRequestExtension } from './pi-deepseek-reasoning-request-settings'
+import { createDeepSeekOpenAIReasoningExtension } from './pi-deepseek-openai-reasoning-request-settings'
+import { createDeepSeekReasoningBridgeExtension } from './deepseek-reasoning-bridge'
 import { createOpenAIReasoningRequestExtension } from './pi-openai-reasoning-request-settings'
 import { mergeRuntimeEnv, type AgentRuntimeEnv } from '../agent-runtime-env'
 import { sanitizePiMessageImageContent, sanitizeToolResultImageContent } from '../image-content-validation'
@@ -732,6 +740,33 @@ function resolveGuardedRealPath(path: string): string {
 
 interface ToolWrapOptions {
   canUseTool?: PiAgentQueryOptions['canUseTool']
+}
+
+/**
+ * 估算每轮固定重发的系统提示 + 工具定义 token。
+ *
+ * 实测 Roy 首轮 input 为 43551 token，而用户首条消息只有 2598 字符（≈1039 token），
+ * 差额 42512 就是这部分固定开销。它不随压缩变小，是「压完还是很慢」的主因之一。
+ * 只用于日志归因，中英混排按约 3.5 字符/token 粗略换算。
+ */
+function estimateFixedOverheadTokens(
+  systemPrompt: string | undefined,
+  tools: Array<{ name: string; description?: string; parameters?: unknown }>,
+): number {
+  const charsPerToken = 3.5
+  let chars = systemPrompt?.length ?? 0
+  for (const tool of tools) {
+    chars += tool.name.length + (tool.description?.length ?? 0)
+    // parameters 是 JSON Schema，序列化后体积即实际传输量
+    if (tool.parameters !== undefined) {
+      try {
+        chars += JSON.stringify(tool.parameters).length
+      } catch {
+        // 循环引用等异常时只算名字和描述，不让归因日志拖垮主流程
+      }
+    }
+  }
+  return Math.ceil(chars / charsPerToken)
 }
 
 function wrapToolWithPermission<TParams extends TSchema, TDetails, TState>(
@@ -1530,9 +1565,22 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
         autoCompactPercent / 100,
       )
+      /** 本次运行的压缩点（token），用于压缩后判断残留是否仍然过高 */
+      const autoCompactionThresholdTokens = calculatePiAutoCompactionThresholdTokens(
+        model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+        autoCompactPercent / 100,
+      )
       let compactContextRequested = false
       let pendingCompactionContinuation: string | undefined
       let automaticCompactionContinuations = 0
+      /**
+       * 本次运行实际生效的保留原文预算。
+       * 压缩后残留偏高时会在 compaction_end 里逐步收紧（见下方诊断分支），
+       * 因为 Pi 不允许连续压缩两次，只能等到下次压缩前生效。
+       */
+      let currentKeepRecentTokens = calculatePiCompactionKeepRecentTokens(
+        model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      )
       /** 照 FeiBo：模型只说不做 / 工具调用漏进正文时，最多提醒 2 次 */
       let stallNudges = 0
       let totalStallNudges = 0
@@ -1559,11 +1607,27 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         ...wrapCustomToolDefinitions(input.customTools, input.canUseTool),
       ].filter(tool => input.assistantMode !== 'conversation' && (!input.slimMode || isSlimTool(tool.name))).map((tool) => harness ? harness.wrap(tool, safeReads.has(tool)) : tool)
 
+      /**
+       * 每轮固定重发的系统提示 + 工具定义估算 token。
+       * 用于把压缩后残留拆开归因：这部分压缩永远碰不到，只有单独计量才能看出
+       * 「压完还是慢」到底该减工具还是降保留预算。
+       */
+      const fixedOverheadTokens = estimateFixedOverheadTokens(
+        input.systemPrompt,
+        customTools,
+      )
+
       const settingsManager = sdk.SettingsManager.inMemory({
         // 使用 Pi SDK 原生压缩策略：
         // - 手动压缩由 session.compact() 触发；
         // - 自动压缩在上下文达到模型窗口的约 80% 时触发；Pi 以 reserveTokens 表示预留空间。
-        compaction: { enabled: true, reserveTokens: autoCompactionReserveTokens },
+        compaction: {
+          enabled: true,
+          reserveTokens: autoCompactionReserveTokens,
+          // 显式给值：Pi 默认 20000 会让压缩后残留偏高（实测仍有 8.6 万），
+          // 压缩收益有限并很快再次撞线。残留仍偏高时 compaction_end 会继续收紧。
+          keepRecentTokens: currentKeepRecentTokens,
+        },
         // Pi 原生 retry 通过 agent.continue() 在同一 transcript 中恢复，能保留已完成的
         // tool_result；不能用外层重投原始 prompt 替代，否则会重复执行副作用工具。
         retry: {
@@ -1580,12 +1644,14 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           transport: inferReasoningTransport(input.provider, input.channelApi),
         })
         : undefined
+      // DeepSeek 的三个渠道协议共用同一套档位语义：anthropic-messages 走
+      // output_config.effort，chat-completions / responses 走 reasoning_effort /
+      // reasoning.effort。之前只认 anthropic-messages，导致中转站渠道（chat-completions）
+      // 根本拿不到 effort，优化模式在那些渠道上等于没开。
+      const channelApi = input.channelApi ?? 'anthropic-messages'
+      const deepSeekTransport = inferReasoningTransport(input.provider, channelApi)
       const deepSeekReasoningProfile = input.provider === 'deepseek'
-        && (input.channelApi ?? 'anthropic-messages') === 'anthropic-messages'
-        ? resolveReasoningProfile({
-          modelId: input.model,
-          transport: 'anthropic-messages',
-        })
+        ? resolveReasoningProfile({ modelId: input.model, transport: deepSeekTransport })
         : undefined
       const projectInstructionScope = input.projectInstructionScope
         ? new ProjectInstructionScopeController({
@@ -1601,15 +1667,39 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               profile: openAIReasoningProfile,
               thinkingLevel: input.openAIThinkingLevel,
               getThinkingLevel: () => active.session?.thinkingLevel ?? active.requestedThinkingLevel ?? input.openAIThinkingLevel,
+              // 标准模式也开降档：短指令不需要按最高档跑，实测这类请求占四成以上
+              simpleTurnDowngrade: true,
             })]
           : []),
         ...(deepSeekReasoningProfile?.encodings['anthropic-messages']?.kind === 'deepseek-output-effort'
           ? [createDeepSeekReasoningRequestExtension({
               profile: deepSeekReasoningProfile,
-              autoDowngrade: input.deepseekOptimized === true,
+              // 降档对所有模式生效：DeepSeek 优化模式只是额外叠加杂活换 Flash 等策略，
+              // 而「短指令不按最高档跑」是普遍成立的，没理由只给优化模式。
+              autoDowngrade: true,
               thinkingLevel: input.thinkingLevel,
               getThinkingLevel: () => active.session?.thinkingLevel ?? active.requestedThinkingLevel ?? input.thinkingLevel,
             })]
+          : []),
+        // 非 Anthropic 协议的 DeepSeek 渠道：effort 由 Pi 按 thinkingLevelMap 自行写入，
+        // 这里只补「简单回合降档」。
+        ...(deepSeekReasoningProfile && (deepSeekTransport === 'openai-completions' || deepSeekTransport === 'openai-responses')
+          ? [createDeepSeekOpenAIReasoningExtension({
+              profile: deepSeekReasoningProfile,
+              transport: deepSeekTransport,
+              autoDowngrade: true,
+              thinkingLevel: input.thinkingLevel,
+              getThinkingLevel: () => active.session?.thinkingLevel ?? active.requestedThinkingLevel ?? input.thinkingLevel,
+            })]
+          : []),
+        // 推理回传链路：补 thinking 签名 + 尾截断。
+        //
+        // 默认关闭：Roy 的 thinking 块一直无签名，历史推理回传为 0；补签名会让它真的
+        // 开始回传，实测是净增输入（115 轮会话末轮约 +47k tokens，截断只能减小增量）。
+        // 所以这里只挂一个不改变行为的空壳，把开关留给后续按任务需要显式开启，
+        // 避免把「优化模式」默默变成加价模式。
+        ...(input.provider === 'deepseek' && input.deepseekOptimized === true
+          ? [createDeepSeekReasoningBridgeExtension({ restoreSignatures: false })]
           : []),
         ...(input.provider === 'openai-codex' && input.codexFastMode
           ? [createCodexFastModeExtension({ fastMode: true })]
@@ -1942,6 +2032,43 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               break
             }
             case 'compaction_end':
+              // 压缩收益不看是否触发，而看压完降到多少：残留仍明显高于阈值时记一条诊断，
+              // 便于在日志里定位「反复压缩但仍很慢」的会话。
+              if (!event.aborted && event.result?.estimatedTokensAfter != null
+                && isCompactionResidualTooHigh(event.result.estimatedTokensAfter, autoCompactionThresholdTokens)) {
+                const keepRecent = currentKeepRecentTokens
+                const breakdown = describeCompactionResidual(
+                  event.result.estimatedTokensAfter,
+                  keepRecent,
+                  event.result.summary?.length ?? 0,
+                  fixedOverheadTokens,
+                )
+                // 残留偏高时收紧下一次压缩的保留预算：Pi 不允许连续压缩两次
+                // （prepareCompaction 在末条为 compaction 时直接返回 undefined），
+                // 所以只能在下次压缩前把预算调小，而不是立刻再压一次。
+                // 基准用预算值而不是 breakdown.keepRecent：后者会被总量截断，
+                // 总量小时用它会把预算砍得过头。
+                if (keepRecent > PI_COMPACTION_KEEP_RECENT_MIN_TOKENS) {
+                  const tightened = Math.max(
+                    PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
+                    Math.floor(keepRecent * 0.5),
+                  )
+                  currentKeepRecentTokens = tightened
+                  settingsManager.applyOverrides({
+                    compaction: { keepRecentTokens: tightened },
+                  })
+                }
+                console.warn(
+                  `[pi-adapter] 压缩后残留偏高: ${event.result.tokensBefore} → ${event.result.estimatedTokensAfter} token`
+                  + `（阈值 ${autoCompactionThresholdTokens}）`
+                  + `；构成：固定开销 ${breakdown.fixedOverhead}`
+                  + ` / 保留原文 ${breakdown.keepRecent}`
+                  + ` / 摘要 ${breakdown.summary}`
+                  + ` / 其他 ${breakdown.unexplained}`
+                  + `；占比最大：${breakdown.dominant}`
+                  + `；下次保留原文预算 → ${currentKeepRecentTokens}`,
+                )
+              }
               if (pendingNativeOverflowRecovery && event.reason === 'overflow') {
                 pendingNativeOverflowRecovery = false
                 const recovered = !event.aborted && event.result !== undefined && event.willRetry

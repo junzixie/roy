@@ -35,18 +35,20 @@ export {
   type GeminiThinkingLevel,
 } from './gemini-model-capabilities'
 export {
-  PI_AUTO_COMPACTION_THRESHOLD_RATIO,  PI_AUTO_COMPACTION_MIN_PERCENT,
+  PI_AUTO_COMPACTION_THRESHOLD_RATIO,
+  PI_AUTO_COMPACTION_MIN_PERCENT,
   PI_AUTO_COMPACTION_MAX_PERCENT,
   PI_AUTO_COMPACTION_ABSOLUTE_MAX_TOKENS,
+  PI_COMPACTION_KEEP_RECENT_TOKENS,
+  PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
   normalizeCompactionPercent,
   calculatePiAutoCompactionReserveTokens,
   calculatePiAutoCompactionThresholdTokens,
-  LAYERED_COMPACT_KEEP_RECENT_MESSAGES,
-  LAYERED_COMPACT_SHORT_TOOL_OUTPUT_CHARS,
-  LAYERED_COMPACT_SUMMARY_INPUT_CHARS,
-  LAYERED_COMPACT_SUMMARY_MAX_CHARS,
-  LAYERED_COMPACT_TOKEN_BUDGET_HINT,
+  calculatePiCompactionKeepRecentTokens,
+  isCompactionResidualTooHigh,
+  describeCompactionResidual,
 } from './pi-compaction'
+export type { CompactionResidualBreakdown } from './pi-compaction'
 export {
   inferMcpTransportType,
   normalizeMcpTransportType,

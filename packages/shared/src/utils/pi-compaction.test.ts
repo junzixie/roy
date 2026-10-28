@@ -3,11 +3,14 @@ import {
   PI_AUTO_COMPACTION_MAX_PERCENT,
   PI_AUTO_COMPACTION_MIN_PERCENT,
   PI_AUTO_COMPACTION_ABSOLUTE_MAX_TOKENS,
+  PI_COMPACTION_KEEP_RECENT_TOKENS,
+  PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
   calculatePiAutoCompactionReserveTokens,
   calculatePiAutoCompactionThresholdTokens,
+  calculatePiCompactionKeepRecentTokens,
+  describeCompactionResidual,
+  isCompactionResidualTooHigh,
   normalizeCompactionPercent,
-  LAYERED_COMPACT_KEEP_RECENT_MESSAGES,
-  LAYERED_COMPACT_TOKEN_BUDGET_HINT,
 } from './pi-compaction'
 
 describe('自动压缩阈值', () => {
@@ -82,8 +85,111 @@ describe('自动压缩阈值', () => {
     expect(normalizeCompactionPercent(72.6)).toBe(73)
   })
 
-  test('分层预算常量已导出且为正', () => {
-    expect(LAYERED_COMPACT_KEEP_RECENT_MESSAGES).toBeGreaterThan(0)
-    expect(LAYERED_COMPACT_TOKEN_BUDGET_HINT).toBeGreaterThan(0)
+  test('保留原文预算低于 Pi 默认 20000，压缩后才能真回落', () => {
+    // 实测：用 Pi 默认 20000 时，压缩后残留仍有 8.6 万 token，很快再次撞线。
+    expect(PI_COMPACTION_KEEP_RECENT_TOKENS).toBeGreaterThan(0)
+    expect(PI_COMPACTION_KEEP_RECENT_TOKENS).toBeLessThan(20_000)
+  })
+})
+describe('压缩保留预算', () => {
+  test('大窗口用固定预算，不用 Pi 默认的 20000', () => {
+    expect(calculatePiCompactionKeepRecentTokens(1_000_000)).toBe(PI_COMPACTION_KEEP_RECENT_TOKENS)
+    expect(calculatePiCompactionKeepRecentTokens(256_000)).toBe(PI_COMPACTION_KEEP_RECENT_TOKENS)
+  })
+
+  test('小窗口按窗口收缩，但不会低于下限', () => {
+    // 30000 的 10% 是 3000，高于下限 2000
+    expect(calculatePiCompactionKeepRecentTokens(30_000)).toBe(3_000)
+    // 8000 的 10% 是 800，被下限抬到 2000
+    expect(calculatePiCompactionKeepRecentTokens(8_000)).toBe(PI_COMPACTION_KEEP_RECENT_MIN_TOKENS)
+  })
+
+  test('窗口非法时抛错', () => {
+    expect(() => calculatePiCompactionKeepRecentTokens(0)).toThrow()
+    expect(() => calculatePiCompactionKeepRecentTokens(Number.NaN)).toThrow()
+  })
+})
+
+describe('压缩后残留判定', () => {
+  test('残留明显高于阈值时判为未收敛', () => {
+    // 阈值 160000，允许 10% 余量即 176000
+    expect(isCompactionResidualTooHigh(180_000, 160_000)).toBe(true)
+  })
+
+  test('残留回落到阈值附近时视为已收敛', () => {
+    expect(isCompactionResidualTooHigh(120_000, 160_000)).toBe(false)
+    expect(isCompactionResidualTooHigh(170_000, 160_000)).toBe(false)
+  })
+
+  test('缺少估算值时不误判', () => {
+    expect(isCompactionResidualTooHigh(undefined, 160_000)).toBe(false)
+    expect(isCompactionResidualTooHigh(Number.NaN, 160_000)).toBe(false)
+  })
+
+  test('阈值非法时不误判', () => {
+    expect(isCompactionResidualTooHigh(200_000, 0)).toBe(false)
+    expect(isCompactionResidualTooHigh(200_000, Number.NaN)).toBe(false)
+  })
+})
+
+describe('压缩点与 Pi 实际触发点一致', () => {
+  test('各窗口 × 各百分比下，阈值都等于 window - reserve', () => {
+    for (const window of [32_000, 128_000, 256_000, 1_000_000]) {
+      for (const percent of [50, 70, 80, 95]) {
+        const ratio = percent / 100
+        const threshold = calculatePiAutoCompactionThresholdTokens(window, ratio)
+        const reserve = calculatePiAutoCompactionReserveTokens(window, ratio)
+        // Pi 在 contextTokens > window - reserve 时压缩，两者必须相等，
+        // 否则 UI 显示的阈值与真实触发时机不符。
+        expect(window - reserve).toBe(threshold)
+      }
+    }
+  })
+
+  test('超过硬顶的窗口按硬顶比例算，不是按虚标窗口算', () => {
+    // 1M 窗口在 80% 下应压到 16 万，而不是 80 万
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.8)).toBe(160_000)
+    // 但百分比依然生效：50% → 10 万，95% → 19 万
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.5)).toBe(100_000)
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.95)).toBe(190_000)
+  })
+})
+
+describe('压缩后残留归因', () => {
+  test('按实测数据拆分：固定开销是最大项', () => {
+    // 真实场景：压缩后 86015，固定开销 42512，保留原文 12000，摘要 11173 字符
+    const r = describeCompactionResidual(86_015, 12_000, 11_173, 42_512)
+    expect(r.fixedOverhead).toBe(42_512)
+    expect(r.keepRecent).toBe(12_000)
+    expect(r.summary).toBeGreaterThan(3_000)
+    // 三项之和不应超过总量
+    expect(r.fixedOverhead + r.keepRecent + r.summary).toBeLessThanOrEqual(86_015)
+    // 固定开销占一半，应被判为最大项
+    expect(r.dominant).toBe('fixedOverhead')
+  })
+
+  test('保留原文异常大时判为最大项', () => {
+    const r = describeCompactionResidual(60_000, 40_000, 1_000, 10_000)
+    expect(r.dominant).toBe('keepRecent')
+  })
+
+  test('摘要很长时判为最大项', () => {
+    // 50000 字符 ≈ 14286 token
+    const r = describeCompactionResidual(40_000, 5_000, 50_000, 8_000)
+    expect(r.dominant).toBe('summary')
+  })
+
+  test('各项都不超过总量，差额归入其他', () => {
+    const r = describeCompactionResidual(10_000, 8_000, 100_000, 8_000)
+    expect(r.fixedOverhead + r.keepRecent + r.summary + r.unexplained).toBe(10_000)
+    expect(r.unexplained).toBeGreaterThanOrEqual(0)
+  })
+
+  test('总量为 0 时不出现负值', () => {
+    const r = describeCompactionResidual(0, 12_000, 5_000, 42_512)
+    expect(r.fixedOverhead).toBe(0)
+    expect(r.keepRecent).toBe(0)
+    expect(r.summary).toBe(0)
+    expect(r.unexplained).toBe(0)
   })
 })
