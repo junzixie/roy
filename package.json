@@ -39,6 +39,7 @@
     "jotai": "^2.17.1",
     "jotai-family": "^1.1.0",
     "node-cron": "^4.6.0",
+    "react-virtuoso": "^4.18.19",
     "reactflow": "^11.11.4"
   },
   "overrides": {
