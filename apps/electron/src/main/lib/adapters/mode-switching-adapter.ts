@@ -54,7 +54,13 @@ export function resolveAgentWorkMode(): AgentWorkMode {
   }
 }
 
-/** DeepSeek 优化模式（只对 DeepSeek 模型生效）属于 Pro 订阅（见 roy-account.ts） */
+/**
+ * DeepSeek 优化模式 - 会员专享功能
+ *
+ * - 所有模型都可以使用此优化模式（不限于 DeepSeek 模型）
+ * - 针对 DeepSeek 模型有奇效
+ * - 普通用户使用标准模式
+ */
 export function isProFeatureUnlocked(): boolean {
   return hasProFeature('deepseek-mode')
 }
