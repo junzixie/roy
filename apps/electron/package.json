@@ -1,7 +1,7 @@
 {
   "name": "@roy/electron",
   "productName": "Roy",
-  "version": "0.20.26",
+  "version": "0.20.27",
   "description": "Roy锛屼负涓撲笟鐢ㄦ埛璁捐鐨?Agent",
   "main": "dist/main.cjs",
   "author": {

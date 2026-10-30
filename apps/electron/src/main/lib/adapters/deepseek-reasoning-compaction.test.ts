@@ -196,3 +196,37 @@ describe('推理回传默认关闭（成本护栏）', () => {
     expect(handlers).toContain('context')
   })
 })
+
+describe('Spark 模式：补签名 + 尾截断 + 锚点联动', () => {
+  test('历史推理补签名后被截断，被截掉前段的排除结论以锚点补回末条 user', () => {
+    const handlers = new Map<string, (event: { messages?: unknown[]; payload?: unknown }) => unknown>()
+    const fakePi = {
+      on: (name: string, fn: (event: { messages?: unknown[]; payload?: unknown }) => unknown) => {
+        handlers.set(name, fn)
+        return () => {}
+      },
+    } as unknown as Parameters<ReturnType<typeof createDeepSeekReasoningBridgeExtension>>[0]
+    createDeepSeekReasoningBridgeExtension({ restoreSignatures: true })(fakePi)
+
+    const longThinking = `先试了本地缓存，已经排除了：缓存 key 不一致。${'中间分析。'.repeat(600)}`
+    const contextHandler = handlers.get('context')
+    const contextResult = contextHandler?.({
+      messages: [{ role: 'assistant', content: [{ type: 'thinking', thinking: longThinking }] }],
+    }) as { messages: Array<{ content: Array<{ thinkingSignature?: string }> }> }
+    expect(contextResult.messages[0]?.content[0]?.thinkingSignature).toBe('reasoning_content')
+
+    const payload = {
+      messages: [
+        { role: 'assistant', content: [], reasoning_content: longThinking },
+        { role: 'user', content: '继续' },
+      ],
+    }
+    const wire = (handlers.get('before_provider_request')?.({ payload }) ?? payload) as {
+      messages: Array<{ reasoning_content?: string; content: string }>
+    }
+    expect(wire).not.toBe(payload)
+    expect(wire.messages[0]?.reasoning_content?.length).toBeLessThan(longThinking.length)
+    expect(wire.messages[1]?.content).toContain('<excluded-paths')
+    expect(wire.messages[1]?.content).toContain('缓存 key 不一致')
+  })
+})

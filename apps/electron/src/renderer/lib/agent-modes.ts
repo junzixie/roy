@@ -11,7 +11,7 @@ export const WORK_MODE_ORDER: AgentWorkMode[] = ['native', 'standard', 'deepseek
 export const WORK_MODE_UI: Record<AgentWorkMode, { label: string; desc: string; pro?: boolean }> = {
   native: { label: '原生模式', desc: 'Roy 几乎不加东西，只给基础工具和最少的规则，体验模型本来的样子' },
   standard: { label: '标准模式', desc: 'Roy 完整能力：浏览器、MCP、技能、日程都可用' },
-  deepseek: { label: 'DeepSeek 优化', desc: '仅限 DeepSeek 模型：简单问答自动降低思考强度，起标题等杂活交给 DeepSeek Flash，更省钱、回复更快', pro: true },
+  deepseek: { label: 'DeepSeek Spark', desc: '仅限 DeepSeek 模型：冻结已发布历史保证前缀缓存命中，历史推理只回传尾部并补偿已排除路径，简单问答自动降思考档，起标题等杂活交给 Flash', pro: true },
 }
 
 export const RUNTIME_MODE_UI: Record<AgentRuntimeMode, { label: string; desc: string }> = {

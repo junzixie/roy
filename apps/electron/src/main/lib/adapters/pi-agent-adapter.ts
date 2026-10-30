@@ -76,8 +76,10 @@ import type {
 import type { Transport as PiAgentTransport } from '@earendil-works/pi-ai'
 import type { AssistantMessageEvent } from '@earendil-works/pi-ai'
 import type { AgentToolResult, AgentToolUpdateCallback } from '@earendil-works/pi-agent-core'
+import type { AgentMessage } from '@earendil-works/pi-agent-core'
 import type { AssistantMessage } from '@earendil-works/pi-ai/compat'
 import { withStreamStallWatchdog } from './stream-stall-watchdog'
+import { withLeakedThinkingTagSplit } from './leaked-thinking-tag'
 import { Type, type TSchema } from 'typebox'
 import {
   appendOutputFormatInstruction,
@@ -95,6 +97,9 @@ import { createCodexFastModeExtension, withCodexFastModeServiceTier } from './pi
 import { createDeepSeekReasoningRequestExtension } from './pi-deepseek-reasoning-request-settings'
 import { createDeepSeekOpenAIReasoningExtension } from './pi-deepseek-openai-reasoning-request-settings'
 import { createDeepSeekReasoningBridgeExtension } from './deepseek-reasoning-bridge'
+import { SessionCacheLog } from './session-cache-log'
+import { FrozenHistory } from './frozen-history'
+import { getAgentSessionsDir } from '../config-paths'
 import { createOpenAIReasoningRequestExtension } from './pi-openai-reasoning-request-settings'
 import { mergeRuntimeEnv, type AgentRuntimeEnv } from '../agent-runtime-env'
 import { sanitizePiMessageImageContent, sanitizeToolResultImageContent } from '../image-content-validation'
@@ -1520,6 +1525,41 @@ export class PiAgentAdapter implements AgentProviderAdapter {
    * `SettingsManager.inMemory()`，在 `query()` 内新建，query 结束即丢弃。
    */
   private tightenedKeepRecentBySession = new Map<string, number>()
+  /**
+   * Spark 模式的已发布字节快照，按会话跨 query 复用。
+   *
+   * 必须挂在实例上：`query()` 每个用户回合都会重新进入，放局部变量等于每轮都从零
+   * 开始「冻结」，历史照样被重新裁剪。
+   */
+  private frozenHistoryBySession = new Map<string, FrozenHistory<AgentMessage>>()
+  /** 逐请求缓存账本，按会话复用；只对 deepseek 渠道开启 */
+  private cacheLogBySession = new Map<string, SessionCacheLog>()
+
+  /** 取（或建）该会话的已发布字节快照 */
+  private frozenHistoryFor(sessionId: string): FrozenHistory<AgentMessage> {
+    let history = this.frozenHistoryBySession.get(sessionId)
+    if (!history) {
+      history = new FrozenHistory<AgentMessage>()
+      this.frozenHistoryBySession.set(sessionId, history)
+    }
+    return history
+  }
+
+  /** 取（或建）该会话的逐请求缓存账本；路径不可用时退化为仅内存记账 */
+  private cacheLogFor(sessionId: string): SessionCacheLog {
+    let log = this.cacheLogBySession.get(sessionId)
+    if (!log) {
+      let filePath: string | undefined
+      try {
+        filePath = join(getAgentSessionsDir(), `${sessionId}.cache.jsonl`)
+      } catch {
+        filePath = undefined
+      }
+      log = new SessionCacheLog(filePath)
+      this.cacheLogBySession.set(sessionId, log)
+    }
+    return log
+  }
   /** abort 兜底强制清理后通知编排层，让本轮不必等 Pi 真正 idle 就能收尾。 */
   onForceAbort?: (sessionId: string) => void
 
@@ -1533,6 +1573,11 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         : new FastHarness({ parallel: process.env.ROY_READ_PARALLEL !== '0', repeatGuard: true, metrics: true, limit: 4 })
     const active = createActivePiSession()
     this.activeSessions.set(input.sessionId, active)
+    // Spark 模式（workMode === 'deepseek' 且 Pro 已解锁）：历史字节冻结。
+    // 账本只对 deepseek 渠道开，避免给其他 provider 凭空写文件。
+    const sparkMode = input.deepseekOptimized === true
+    const frozenHistory = sparkMode ? this.frozenHistoryFor(input.sessionId) : undefined
+    const cacheLog = input.provider === 'deepseek' ? this.cacheLogFor(input.sessionId) : undefined
     const queue = createAsyncQueue<SDKMessage>()
     active.cancelQueue = () => queue.close()
     // Keep normal tasks running until completion; explicit user limits remain in runtimeGuard.
@@ -1753,12 +1798,12 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           : []),
         // 推理回传链路：补 thinking 签名 + 尾截断。
         //
-        // 默认关闭：Roy 的 thinking 块一直无签名，历史推理回传为 0；补签名会让它真的
-        // 开始回传，实测是净增输入（115 轮会话末轮约 +47k tokens，截断只能减小增量）。
-        // 所以这里只挂一个不改变行为的空壳，把开关留给后续按任务需要显式开启，
-        // 避免把「优化模式」默默变成加价模式。
+        // Spark 模式开启时必须两者同时生效：只补签名会让历史推理全量回传，实测净增输入
+        // （115 轮会话末轮约 +47k tokens）；只截断则没有内容可截，等于空转。
+        // 截断长度取模块默认值 2000 字符（约 800 tokens）：常量钉死，会话内不随配置漂移，
+        // 否则每轮字节都变，前缀缓存会一直碎。非 Spark 模式保持不注册（行为不变）。
         ...(input.provider === 'deepseek' && input.deepseekOptimized === true
-          ? [createDeepSeekReasoningBridgeExtension({ restoreSignatures: false })]
+          ? [createDeepSeekReasoningBridgeExtension({ restoreSignatures: true, injectAnchors: true })]
           : []),
         ...(input.provider === 'openai-codex' && input.codexFastMode
           ? [createCodexFastModeExtension({ fastMode: true })]
@@ -1825,7 +1870,15 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           })
           return sanitizePiMessageImageContent([{ role: 'system', content: input.systemPrompt, timestamp: Date.now() }, ...recent])
         }
-        return sanitizePiMessageImageContent(pruned)
+        // Spark 模式：已发布过的消息复用当初发出去的字节，只有新消息采用本轮裁剪结果。
+        // 分级裁剪会随着消息「变老」跨档收紧，若每轮都重算，历史字节就在跨界处变化，
+        // 前缀缓存从该位置往后全部失效。冻结后，跨界只影响尚未发布的新消息。
+        if (!frozenHistory) return sanitizePiMessageImageContent(pruned)
+        const frozen = frozenHistory.apply(messages, pruned)
+        if (frozen.rewroteAt !== null) {
+          console.log(`[Spark 缓存] 历史在第 ${frozen.rewroteAt} 条消息发生变化，前缀从该位置重建 sessionId=${input.sessionId}`)
+        }
+        return sanitizePiMessageImageContent(frozen.messages)
       }
       if (projectInstructionScope) {
         const previousPrepareNextTurnWithContext = session.agent.prepareNextTurnWithContext
@@ -1874,7 +1927,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       // 代理作用域必须只覆盖模型 provider stream：在整个 session.prompt() 链上设
       // AsyncLocalStorage 会把 MCP/产品工具等同一 Agent loop 中的 fetch 也错误地送进 Codex 代理。
       // 看门狗：模型流长时间没有新事件就主动断开，交给 Pi 自动重试，不再干等上游掐断连接。
-      const providerStreamFn = withStreamStallWatchdog(session.agent.streamFunction)
+      // DeepSeek 偶尔把正文接在推理里的 `</thinking>` 之后，content 为空；落库前移回正文。
+      const providerStreamFn = withStreamStallWatchdog(input.provider === 'deepseek'
+        ? withLeakedThinkingTagSplit(session.agent.streamFunction)
+        : session.agent.streamFunction)
       const liveProviderStreamFn = withLiveThinkingLevel(providerStreamFn, () => session.thinkingLevel)
       // 提示缓存：把 cacheRetention 与会话亲和 key 注入每次 provider 请求。
       // Pi 默认 cacheRetention='short'，而 short 在非 api.openai.com 的地址上
@@ -1884,17 +1940,25 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       // 这里只保证「用户选高缓存时字段确实带上」。
       const cacheRetention = resolveCacheRetention(getSettings().promptCacheMode)
       const cacheKey = cacheKeyForSession(session.sessionId)
-      const cachedProviderStreamFn: typeof liveProviderStreamFn = (requestModel, context, options) => liveProviderStreamFn(
-        requestModel,
-        context,
-        {
-          ...options,
-          cacheRetention,
-          // 会话 ID 作为亲和 key：同一会话的多轮请求尽量落到同一缓存分片。
-          // sessionId 缺失或过长时保持 undefined，退化成服务端按前缀匹配。
-          ...(cacheKey && options?.sessionId === undefined ? { sessionId: cacheKey } : {}),
-        },
-      )
+      const cachedProviderStreamFn: typeof liveProviderStreamFn = (requestModel, context, options) => {
+        // 账本要在真正写 wire 之前记：此时 context 已经是本轮最终发出的消息数组。
+        cacheLog?.beginRequest({
+          model: requestModel.id,
+          ...(sparkMode ? { mode: 'deepseek-spark' } : {}),
+          messages: context.messages,
+        })
+        return liveProviderStreamFn(
+          requestModel,
+          context,
+          {
+            ...options,
+            cacheRetention,
+            // 会话 ID 作为亲和 key：同一会话的多轮请求尽量落到同一缓存分片。
+            // sessionId 缺失或过长时保持 undefined，退化成服务端按前缀匹配。
+            ...(cacheKey && options?.sessionId === undefined ? { sessionId: cacheKey } : {}),
+          },
+        )
+      }
       session.agent.streamFunction = (requestModel, context, options) => runWithPiRequestProxy(
         requestProxyDispatcher,
         () => cachedProviderStreamFn(requestModel, context, options),
@@ -2016,6 +2080,19 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 ...(assistantUuid && { uuid: assistantUuid }),
                 ...(isAssistant && responseBudget.summaryNotice && { notice: responseBudget.summaryNotice }),
               })
+              // 一次真实的模型调用结束时才有 usage：把它配给刚才开始的那次请求。
+              // 失败/中止的请求会在下一次 beginRequest 时自动补记，不会丢行。
+              if (isAssistant && cacheLog) {
+                const usage = (event.message as AssistantMessage).usage
+                if (usage) {
+                  cacheLog.complete({
+                    input: usage.input,
+                    output: usage.output,
+                    cacheRead: usage.cacheRead,
+                    cacheWrite: usage.cacheWrite,
+                  })
+                }
+              }
               const shouldDeferNativeOverflow = isAssistant
                 && shouldDeferPiOverflowTerminalMessage(event.message as AssistantMessage, model.contextWindow)
               const shouldDeferAssistantTerminal = isAssistant && (
