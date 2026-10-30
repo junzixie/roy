@@ -39,6 +39,8 @@ import {
   CHANNEL_API_PATHS,
   buildChannelPreviewUrl,
   inferChannelApi,
+  allowedChannelApis,
+  sanitizeChannelApi,
   defaultNewChannelSetup,
   parseZhipuTeamCredentials,
   parseCodexCredentials,
@@ -1073,9 +1075,9 @@ export function ChannelForm({ channel, initialProvider, onSaved, onCancel }: Cha
             <div className="text-xs leading-5 text-muted-foreground">
               不知道选哪个就保持默认：Roy 会按供应商类型推导；国内模型、DeepSeek、大多数中转站用 Chat Completions。
             </div>
-            <div className="grid grid-cols-3 gap-2">
-              {(['chat-completions', 'responses', 'anthropic-messages'] as ChannelApi[]).map((value) => {
-                const active = api === value
+            <div className={cn('grid gap-2', allowedChannelApis(provider).length === 2 ? 'grid-cols-2' : 'grid-cols-3')}>
+              {allowedChannelApis(provider).map((value) => {
+                const active = (sanitizeChannelApi(provider, api) ?? api) === value
                 return (
                   <button
                     key={value}
@@ -1096,7 +1098,7 @@ export function ChannelForm({ channel, initialProvider, onSaved, onCancel }: Cha
                 )
               })}
             </div>
-            <div className="text-[11.5px] leading-5 text-muted-foreground">{CHANNEL_API_HINTS[api]}</div>
+            <div className="text-[11.5px] leading-5 text-muted-foreground">{CHANNEL_API_HINTS[sanitizeChannelApi(provider, api) ?? api]}</div>
           </div>
 
           {/* 发送思考强度：中转站或模型不认识 reasoning_effort 参数时关掉 */}

@@ -43,6 +43,27 @@ export function inferChannelApi(provider: ProviderType): ChannelApi {
   return 'chat-completions'
 }
 
+const ALL_CHANNEL_APIS: readonly ChannelApi[] = ['chat-completions', 'responses', 'anthropic-messages']
+
+/**
+ * 不支持 /responses 的供应商：DeepSeek 官方只给 Chat Completions 和 Anthropic 两种格式，
+ * 中转站把 Responses 转成 DeepSeek 请求时常报 convert_request_failed。
+ */
+const NO_RESPONSES_PROVIDERS: ReadonlySet<ProviderType> = new Set<ProviderType>(['deepseek'])
+
+/** 该供应商在表单里可选的协议。 */
+export function allowedChannelApis(provider: ProviderType): ChannelApi[] {
+  if (NO_RESPONSES_PROVIDERS.has(provider)) return ALL_CHANNEL_APIS.filter((api) => api !== 'responses')
+  return [...ALL_CHANNEL_APIS]
+}
+
+/** 把不可用的协议换成该供应商的第一个可用协议；undefined 原样返回（交给 inferChannelApi）。 */
+export function sanitizeChannelApi(provider: ProviderType, api: ChannelApi | undefined): ChannelApi | undefined {
+  if (!api) return api
+  const allowed = allowedChannelApis(provider)
+  return allowed.includes(api) ? api : allowed[0]
+}
+
 /** 解析渠道实际使用的协议：显式 api 优先，否则按 provider 推导。 */
 export function resolveChannelApi(channel: {
   provider: ProviderType

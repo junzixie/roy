@@ -56,6 +56,19 @@ interface PiMcpServerConfig {
   timeout?: unknown
   proxyUrl?: unknown
   required?: unknown
+  /** 'on-demand'：平时不连接，经入口工具或 @ 点名时才连接，空闲后自动断开 */
+  loadMode?: unknown
+}
+
+/** 按需 MCP 空闲多久后断开（毫秒）。 */
+const ON_DEMAND_IDLE_CLOSE_MS = 5 * 60_000
+/** 空闲检查间隔。 */
+const ON_DEMAND_IDLE_SWEEP_MS = 60_000
+/** 入口工具名。 */
+export const ON_DEMAND_GATEWAY_TOOL_NAME = 'mcp_on_demand'
+
+function isOnDemand(config: PiMcpServerConfig): boolean {
+  return config.loadMode === 'on-demand'
 }
 
 type PiMcpServers = Record<string, Record<string, unknown>>
@@ -314,6 +327,52 @@ async function listRequiredMcpTools(
 class PiMcpClientManager {
   private readonly connections = new Map<string, McpConnectionEntry>()
   private lifecycleGeneration = 0
+  /** 按需连接最近一次使用时间（key 同 connections）。 */
+  private readonly onDemandLastUsed = new Map<string, { serverName: string; at: number }>()
+  private idleTimer: ReturnType<typeof setInterval> | undefined
+
+  /** 记一次按需连接的使用，并确保空闲检查在跑。 */
+  private touchOnDemand(key: string, serverName: string): void {
+    this.onDemandLastUsed.set(key, { serverName, at: Date.now() })
+    if (!this.idleTimer) {
+      this.idleTimer = setInterval(() => { void this.closeIdleOnDemand() }, ON_DEMAND_IDLE_SWEEP_MS)
+      this.idleTimer.unref?.()
+    }
+  }
+
+  /** 断开空闲超过 ON_DEMAND_IDLE_CLOSE_MS 的按需连接；正在调用中的不动。 */
+  async closeIdleOnDemand(now = Date.now(), idleMs = ON_DEMAND_IDLE_CLOSE_MS): Promise<string[]> {
+    const closed: string[] = []
+    for (const [key, { serverName, at }] of [...this.onDemandLastUsed]) {
+      const entry = this.connections.get(key)
+      if (!entry) {
+        this.onDemandLastUsed.delete(key)
+        continue
+      }
+      if (now - at < idleMs || entry.activeLeases > 0) continue
+      this.onDemandLastUsed.delete(key)
+      entry.stale = true
+      this.connections.delete(key)
+      try {
+        const conn = await entry.promise
+        await conn.close()
+      } catch {
+        // 连接本身失败或已关闭，忽略
+      }
+      closed.push(serverName)
+      console.log(`[Pi MCP] 按需 MCP 服务器 ${serverName} 已空闲 ${Math.round(idleMs / 60_000)} 分钟，已断开`)
+    }
+    if (this.onDemandLastUsed.size === 0 && this.idleTimer) {
+      clearInterval(this.idleTimer)
+      this.idleTimer = undefined
+    }
+    return closed
+  }
+
+  /** 当前保持着的连接名（测试与状态展示用）。 */
+  connectedServerNames(): string[] {
+    return [...this.connections.keys()].map((key) => key.slice(0, key.lastIndexOf(':')))
+  }
 
   /**
    * 关闭所有活跃的 MCP 连接，释放 stdio 子进程和网络资源。
@@ -323,6 +382,11 @@ class PiMcpClientManager {
     this.lifecycleGeneration += 1
     const entries = [...this.connections.values()]
     this.connections.clear()
+    this.onDemandLastUsed.clear()
+    if (this.idleTimer) {
+      clearInterval(this.idleTimer)
+      this.idleTimer = undefined
+    }
     requiredMcpFailureTimestamps.clear()
     await Promise.allSettled(
       entries.map(async (entry) => {
@@ -418,6 +482,7 @@ class PiMcpClientManager {
 
   private async acquireConnection(serverName: string, config: PiMcpServerConfig): Promise<McpConnectionLease> {
     const key = `${serverName}:${configHash(config)}`
+    if (isOnDemand(config)) this.touchOnDemand(key, serverName)
     let entry = this.connections.get(key)
 
     if (!entry) {
@@ -467,6 +532,9 @@ class PiMcpClientManager {
 
   private async releaseConnection(lease: McpConnectionLease): Promise<void> {
     lease.entry.activeLeases -= 1
+    // 按需连接的空闲时间从最后一次调用结束算起
+    const usage = this.onDemandLastUsed.get(lease.key)
+    if (usage) usage.at = Date.now()
     if (!lease.entry.stale || lease.entry.closed || lease.entry.activeLeases > 0) return
     try {
       await lease.connection.close()
@@ -544,13 +612,77 @@ function createPiMcpToolDefinition(binding: McpToolBinding): ToolDefinition {
   } as ToolDefinition
 }
 
+function textResult(text: string): AgentToolResult<unknown> {
+  return { content: [{ type: 'text', text }], details: {} } as AgentToolResult<unknown>
+}
+
+/**
+ * 按需 MCP 的入口工具：模型只看到这一个工具和服务器名单，
+ * 需要时先 list_tools（这时才连接），再 call。连接空闲 5 分钟后自动断开。
+ */
+function createOnDemandGatewayTool(servers: PiMcpServers): ToolDefinition {
+  const names = Object.keys(servers)
+  const description = [
+    `按需连接的 MCP 服务器入口。可用服务器：${names.join('、')}。`,
+    '这些服务器平时不连接，调用本工具时才连接，空闲 5 分钟后自动断开。',
+    '用法：先 action="list_tools" 查看该服务器的工具和参数，再 action="call" 传 tool 和 arguments 调用。',
+  ].join('')
+  return {
+    name: ON_DEMAND_GATEWAY_TOOL_NAME,
+    label: '按需 MCP',
+    description,
+    promptSnippet: `${ON_DEMAND_GATEWAY_TOOL_NAME}: ${description}`,
+    parameters: Type.Object({
+      server: Type.String({ description: `服务器名：${names.join(' | ')}` }),
+      action: Type.Union([Type.Literal('list_tools'), Type.Literal('call')]),
+      tool: Type.Optional(Type.String({ description: 'action=call 时要调用的工具名（list_tools 返回的 name）' })),
+      arguments: Type.Optional(Type.Record(Type.String(), Type.Any(), { description: 'action=call 时传给工具的参数' })),
+    }),
+    async execute(_toolCallId, params, signal) {
+      const p = (isObjectSchema(params) ? params : {}) as { server?: unknown; action?: unknown; tool?: unknown; arguments?: unknown }
+      const serverName = typeof p.server === 'string' ? p.server : ''
+      const config = servers[serverName] as PiMcpServerConfig | undefined
+      if (!config) return textResult(`没有名为「${serverName}」的按需 MCP 服务器。可用：${names.join('、')}`)
+
+      if (p.action === 'list_tools') {
+        const mcpTools = await manager.listTools(serverName, config)
+        const summary = mcpTools.map((tool) => ({ name: tool.name, description: tool.description ?? '', inputSchema: tool.inputSchema }))
+        return textResult(JSON.stringify({ server: serverName, connected: true, tools: summary }))
+      }
+
+      if (p.action === 'call') {
+        if (typeof p.tool !== 'string' || !p.tool) return textResult('action=call 需要 tool（先用 list_tools 查看可用工具名）')
+        const args = isObjectSchema(p.arguments) ? p.arguments as Record<string, unknown> : {}
+        const result = await manager.callTool(serverName, config, p.tool, args, signal)
+        return convertMcpResult(result)
+      }
+
+      return textResult('action 只能是 list_tools 或 call')
+    },
+  } as ToolDefinition
+}
+
+/** 断开空闲的按需 MCP 连接（测试用；运行时由定时器自动执行）。 */
+export async function closeIdleOnDemandMcpConnections(now?: number, idleMs?: number): Promise<string[]> {
+  return manager.closeIdleOnDemand(now, idleMs)
+}
+
+/** 当前保持着的 MCP 连接名（测试用）。 */
+export function getConnectedMcpServerNames(): string[] {
+  return manager.connectedServerNames()
+}
+
 /**
  * 将 Roy 已构建的 MCP server 配置转换为 Pi customTools。
  *
  * 注意：本函数仅供 Pi runtime 使用；Claude runtime 仍直接把 mcpServers 交给
  * Claude Agent SDK，不经过这里。
  */
-export async function buildPiMcpTools(mcpServers: PiMcpServers, proxyUrl?: string): Promise<ToolDefinition[]> {
+export async function buildPiMcpTools(
+  mcpServers: PiMcpServers,
+  proxyUrl?: string,
+  options: { activateServers?: string[] } = {},
+): Promise<ToolDefinition[]> {
   const tools: ToolDefinition[] = []
   const proxiedServers = proxyUrl
     ? Object.fromEntries(Object.entries(mcpServers).map(([name, config]) => {
@@ -563,12 +695,20 @@ export async function buildPiMcpTools(mcpServers: PiMcpServers, proxyUrl?: strin
     : mcpServers
   const seenToolNames = new Set<string>()
   const discovery: Array<{ server: string; status: string; tools: number; stage: string }> = []
+  const activate = new Set(options.activateServers ?? [])
 
-  // 并行连接所有 MCP 服务器，避免串行等待导致启动慢
-  const entries = Object.entries(proxiedServers).filter(([, rawConfig]) => {
+  const supported = Object.entries(proxiedServers).filter(([, rawConfig]) => {
     const type = (rawConfig as PiMcpServerConfig).type
     return type === 'stdio' || type === 'http' || type === 'sse'
   })
+  // 按需服务器：被 @ 点名时本轮照常加载全部工具；否则只经入口工具访问
+  const entries = supported.filter(([name, rawConfig]) => !isOnDemand(rawConfig as PiMcpServerConfig) || activate.has(name))
+  const deferred = supported.filter(([name, rawConfig]) => isOnDemand(rawConfig as PiMcpServerConfig) && !activate.has(name))
+  for (const [name] of deferred) {
+    discovery.push({ server: name, status: 'on_demand', tools: 0, stage: 'deferred' })
+  }
+
+  // 并行连接所有 MCP 服务器，避免串行等待导致启动慢
 
   const results = await Promise.allSettled(
     entries.map(async ([serverName, rawConfig]) => {
@@ -614,11 +754,16 @@ export async function buildPiMcpTools(mcpServers: PiMcpServers, proxyUrl?: strin
     console.log(`[Pi MCP] 已桥接 ${tools.length} 个用户 MCP 工具到 Pi customTools`)
   }
 
-  if (entries.length > 0) {
+  if (deferred.length > 0) {
+    tools.push(createOnDemandGatewayTool(Object.fromEntries(deferred) as PiMcpServers))
+    console.log(`[Pi MCP] 按需 MCP 服务器 ${deferred.map(([name]) => name).join(', ')} 本轮未连接，经 ${ON_DEMAND_GATEWAY_TOOL_NAME} 入口访问`)
+  }
+
+  if (supported.length > 0) {
     tools.push({
       name: 'mcp_connection_status',
       label: 'MCP 连接状态',
-      description: '查看本轮 MCP 工具发现结果（不是实时重连）：ready 才表示本轮可调用。失败或无工具不能声称已连接。不返回凭据。',
+      description: `查看本轮 MCP 工具发现结果（不是实时重连）：ready 才表示本轮可调用；on_demand 表示按需服务器，需经 ${ON_DEMAND_GATEWAY_TOOL_NAME} 调用。失败或无工具不能声称已连接。不返回凭据。`,
       parameters: Type.Object({}),
       async execute() {
         return { content: [{ type: 'text', text: JSON.stringify({ scope: 'current_turn_discovery', servers: discovery }) }], details: {} }

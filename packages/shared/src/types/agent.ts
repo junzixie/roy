@@ -1049,6 +1049,9 @@ export interface McpOAuthConfiguration {
   scopes?: string[]
 }
 
+/** MCP 加载方式 */
+export type McpLoadMode = 'always' | 'on-demand'
+
 /** MCP 服务器条目 */
 export interface McpServerEntry {
   type: McpTransportType
@@ -1066,6 +1069,12 @@ export interface McpServerEntry {
   timeout?: number
   /** 是否启用 */
   enabled: boolean
+  /**
+   * 加载方式：
+   * - always（默认）：每轮都连接，工具全部交给模型
+   * - on-demand：平时不连接，只露出一个入口工具；被 @ 或模型通过入口调用时才连接，空闲后自动断开
+   */
+  loadMode?: McpLoadMode
   /** 非敏感 OAuth 客户端元数据；token 只保存在 Keychain。 */
   oauth?: McpOAuthConfiguration
   /** 是否为内置 MCP（不可删除，仅可配置 env） */

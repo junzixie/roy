@@ -18,6 +18,8 @@ import {
   PROVIDER_DEFAULT_URLS,
   PROVIDER_LABELS,
   inferChannelApi,
+  allowedChannelApis,
+  sanitizeChannelApi,
   defaultNewChannelSetup,
 } from '@roy/shared'
 import type { Channel, ChannelApi, ChannelModel, ProviderType } from '@roy/shared'
@@ -192,7 +194,8 @@ export function ChannelEditor({ draft: initial, onSave, onAutoSaveModels, onCanc
   }, [])
 
   const hasApiChoice = providerHasApiChoice(d.provider)
-  const api = d.api ?? inferChannelApi(d.provider)
+  const apiOptions = allowedChannelApis(d.provider)
+  const api = sanitizeChannelApi(d.provider, d.api) ?? inferChannelApi(d.provider)
   const endpoint = previewEndpoint(d.baseUrl, d.provider, hasApiChoice ? api : undefined)
   const enabledModels = d.models.filter((model) => model.enabled)
   const hint = PROVIDER_HINTS[d.provider]
@@ -276,7 +279,7 @@ export function ChannelEditor({ draft: initial, onSave, onAutoSaveModels, onCanc
       const result = await window.electronAPI.detectChannelApi({ baseUrl: d.baseUrl, apiKey: d.apiKey, model, useProxy: true })
       setDet(result)
       if (result.best) {
-        const best = result.best
+        const best = sanitizeChannelApi(d.provider, result.best) ?? result.best
         setD((x) => {
           // 内置供应商只换协议不动地址（它们的根地址有特殊规则）；自定义中转站连地址一起换
           if (isCustomProvider(x.provider)) return { ...x, ...adaptCustom(x, best, result.baseUrl) }
@@ -367,8 +370,8 @@ export function ChannelEditor({ draft: initial, onSave, onAutoSaveModels, onCanc
           <div className="mb-2 text-[12px] leading-5 text-muted-foreground">
             不知道选哪个就点「自动检测」：填好 Base URL、Key，再选一个模型，Roy 会把三种格式都试一下，替你选能用、效果最好的。
           </div>
-          <div className="grid grid-cols-3 gap-2">
-            {API_ORDER.map((item) => {
+          <div className={cn('grid gap-2', apiOptions.length === 2 ? 'grid-cols-2' : 'grid-cols-3')}>
+            {API_ORDER.filter((item) => apiOptions.includes(item)).map((item) => {
               const on = api === item
               const r = det?.results[item]
               return (

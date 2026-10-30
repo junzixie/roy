@@ -131,6 +131,14 @@ export function McpCard({
             内置托管
           </span>
         )}
+        {entry.loadMode === 'on-demand' && (
+          <span
+            className="rounded-md bg-muted px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground"
+            title="平时不连接；@ 它或模型需要时才连接，空闲 5 分钟自动断开"
+          >
+            按需
+          </span>
+        )}
         {!isBuiltin && !readOnly && onAuthorize && (
           <button
             type="button"

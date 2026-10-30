@@ -129,6 +129,8 @@ export {
   inferChannelApi,
   defaultNewChannelSetup,
   resolveChannelApi,
+  allowedChannelApis,
+  sanitizeChannelApi,
   buildChannelPreviewUrl,
   CHANNEL_API_PATHS,
   CHANNEL_API_LABELS,

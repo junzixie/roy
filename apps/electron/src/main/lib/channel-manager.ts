@@ -41,6 +41,7 @@ import {
   serializeXaiCredentials,
   isXaiCredentialExpired,
   VOLCENGINE_CODING_PLAN_MODELS,
+  sanitizeChannelApi,
 } from '@roy/shared'
 import { refreshCodexOAuth } from './codex-oauth-service'
 import { refreshGithubCopilotOAuth } from './github-copilot-oauth-service'
@@ -601,7 +602,7 @@ export function createChannel(input: ChannelCreateInput): Channel {
     apiKey: encryptApiKey(input.apiKey),
     models: input.models,
     // 协议跟着渠道存下来，请求构造时用它决定打到哪个路径
-    api: input.api,
+    api: sanitizeChannelApi(input.provider, input.api),
     reasoning: input.reasoning,
     proxy: input.proxy,
     enabled: input.enabled,
@@ -640,7 +641,7 @@ export function updateChannel(id: string, input: ChannelUpdateInput): Channel {
     baseUrl: input.baseUrl ?? existing.baseUrl,
     apiKey: input.apiKey ? encryptApiKey(input.apiKey) : existing.apiKey,
     models: input.models ?? existing.models,
-    api: input.api ?? existing.api,
+    api: sanitizeChannelApi(input.provider ?? existing.provider, input.api ?? existing.api),
     reasoning: input.reasoning ?? existing.reasoning,
     proxy: input.proxy ?? existing.proxy,
     enabled: input.enabled ?? existing.enabled,

@@ -361,6 +361,7 @@ export class AgentOrchestrator {
           ...(Object.keys(mergedEnv).length > 0 && { env: mergedEnv }),
           required: true,
           startup_timeout_sec: entry.timeout ?? 30,
+          ...(entry.loadMode === 'on-demand' && { loadMode: 'on-demand' }),
         }
       } else if ((type === 'http' || type === 'sse') && entry.url) {
         let oauthHeaders: Record<string, string> | undefined
@@ -378,6 +379,7 @@ export class AgentOrchestrator {
           ...(proxyUrl && { proxyUrl }),
           startup_timeout_sec: entry.timeout ?? 30,
           required: true,
+          ...(entry.loadMode === 'on-demand' && { loadMode: 'on-demand' }),
         }
       } else {
         console.warn(`[Agent 编排] MCP 服务器 "${name}" 配置不完整，已跳过（type=${entry.type}, command=${entry.command ?? '无'}, url=${entry.url ?? '无'}）`)
@@ -1309,7 +1311,7 @@ export class AgentOrchestrator {
       // Roy 主进程连接用户 MCP server，并转换为 Pi custom tools。
       if (input.assistantMode !== 'conversation' && Object.keys(mcpServers).length > 0) {
         try {
-          piMcpTools = await buildPiMcpTools(mcpServers)
+          piMcpTools = await buildPiMcpTools(mcpServers, undefined, { activateServers: mentionedMcpServers })
         } catch (error) {
           console.warn('[Agent 编排] Pi MCP 工具桥接失败，已跳过用户 MCP:', error)
         }

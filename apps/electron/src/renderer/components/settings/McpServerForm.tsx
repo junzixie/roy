@@ -80,6 +80,7 @@ function serializeKeyValueText(record: Record<string, string> | undefined, separ
 interface McpFormValues {
   transportType: McpTransportType
   enabled: boolean
+  onDemand: boolean
   testResult: { success: boolean; message: string; timestamp?: number } | null
   isBuiltin: boolean
   /** OAuth 公开元数据不在此表单编辑，但保存其他字段时必须原样保留。 */
@@ -97,6 +98,7 @@ function buildEntryFromValues(values: McpFormValues, includeTestResult = false):
   const base: McpServerEntry = {
     type: values.transportType,
     enabled: values.enabled,
+    ...(values.onDemand && { loadMode: 'on-demand' as const }),
     ...(values.isBuiltin && { isBuiltin: true }),
     ...(values.oauth && { oauth: values.oauth }),
     ...(includeTestResult && values.testResult && {
@@ -136,6 +138,7 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
   const [name, setName] = React.useState(server?.name ?? '')
   const [transportType, setTransportType] = React.useState<McpTransportType>(server?.entry.type ?? 'stdio')
   const [enabled, setEnabled] = React.useState(server?.entry.enabled ?? false) // 默认关闭
+  const [onDemand, setOnDemand] = React.useState(server?.entry.loadMode === 'on-demand')
   const explicitlyDisabledRef = React.useRef(false)
   // Strict Mode 会重复执行 mount effect；只有真实用户操作才能解锁自动保存，
   // 以保证“查看配置”不会触发 SAVE_MCP_CONFIG → 禁用 → 验证 → 重启用。
@@ -176,13 +179,13 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
 
   // 保留最新表单值，供 unmount 时 flush 待保存变更
   const latestValuesRef = React.useRef({
-    name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, testResult, isBuiltin, oauth,
+    name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, onDemand, testResult, isBuiltin, oauth,
   })
   React.useEffect(() => {
     latestValuesRef.current = {
-      name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, testResult, isBuiltin, oauth,
+      name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, onDemand, testResult, isBuiltin, oauth,
     }
-  }, [name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, testResult, isBuiltin, oauth])
+  }, [name, transportType, command, url, argsText, envText, headersText, timeoutStr, enabled, onDemand, testResult, isBuiltin, oauth])
 
   // 监听配置改变，清空测试结果（避免展示过期的测试结果）
   React.useEffect(() => {
@@ -209,6 +212,7 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
       {
         transportType,
         enabled,
+        onDemand,
         testResult,
         isBuiltin,
         oauth,
@@ -292,6 +296,7 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
     headersText,
     timeoutStr,
     enabled,
+    onDemand,
   ])
 
   // Strict Mode 会执行一次 setup → cleanup → setup；每次 setup 都恢复 mounted 状态。
@@ -610,6 +615,16 @@ export function McpServerForm({ server, workspaceSlug, onSaved, onChanged, onCan
             }
             checked={enabled}
             onCheckedChange={handleEnabledChange}
+          />
+          <SettingsToggle
+            label="按需连接"
+            description={
+              onDemand
+                ? '平时不连接，也不把工具说明发给模型；@ 它或模型需要时才连接，空闲 5 分钟自动断开。'
+                : '每轮对话都连接，并把它的全部工具交给模型。'
+            }
+            checked={onDemand}
+            onCheckedChange={(value) => { markUserEdited(); setOnDemand(value) }}
           />
         </SettingsCard>
       </SettingsSection>
