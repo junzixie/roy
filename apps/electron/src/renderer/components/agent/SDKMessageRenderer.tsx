@@ -1188,6 +1188,10 @@ export function AssistantErrorTail({
     isThinkingSignatureError(bodyText, errorText)
   const displayTitle = errorTitle ?? (isThinkingSignature ? THINKING_SIGNATURE_ERROR_TITLE : undefined)
   const displayContentText = isThinkingSignature ? THINKING_SIGNATURE_ERROR_MESSAGE : bodyText
+  // 有标题的错误只显示标题；上游原始报错（常是整段 JSON）折叠起来，避免看起来像模型回复
+  const foldRawError = !!displayTitle && !isThinkingSignature && !isLocalProjectRootUnavailable
+    && !!displayContentText && displayContentText.trim() !== displayTitle
+  const [rawErrorOpen, setRawErrorOpen] = React.useState(false)
   const displayedErrorActions = (errorActions ?? []).filter((action) => {
     if (action.action === 'retry' && !onRetry) return false
     if (action.action === 'compact' && !onCompact) return false
@@ -1271,7 +1275,22 @@ export function AssistantErrorTail({
           {displayTitle}
         </div>
       )}
-      {standalone ? (
+      {foldRawError ? (
+        <div className="text-[11px] text-muted-foreground">
+          <button
+            type="button"
+            onClick={() => setRawErrorOpen((v) => !v)}
+            className="underline-offset-2 hover:underline"
+          >
+            {rawErrorOpen ? '收起原始报错' : '查看原始报错'}
+          </button>
+          {rawErrorOpen && (
+            <div className="mt-1.5 whitespace-pre-wrap break-all font-mono text-[11px] leading-4 text-muted-foreground">
+              {displayContentText}
+            </div>
+          )}
+        </div>
+      ) : standalone ? (
         <div className="text-destructive">
           <MessageResponse>{displayContentText}</MessageResponse>
         </div>

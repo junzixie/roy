@@ -103,6 +103,8 @@ export function buildContextPrompt(sessionId: string, currentUserMessage: string
   const recent = history.slice(-MAX_CONTEXT_MESSAGES)
   const lines = recent
     .filter((m) => (m.type === 'user' || m.type === 'assistant'))
+    // Roy 插入的错误卡片不是模型回复，不能当历史回填给模型
+    .filter((m) => typeof (m as { _errorCode?: unknown })._errorCode !== 'string')
     .map((m) => {
       // 从 SDKMessage 的 message.content 中提取文本
       const content = (m as { message?: { content?: Array<{ type: string; text?: string; name?: string; input?: Record<string, unknown> }> } }).message?.content

@@ -83,6 +83,9 @@ function extractHttpStatusFromErrorText(...messages: string[]): number | null {
     /API error[^:]*:\s+(\d{3})/i,
     /\b(?:HTTP|status|statusCode)\s*[:=]?\s*(\d{3})\b/i,
     /\b(\d{3})\s+\{[^}]*"error"/is,
+    // Cloudflare 等网关：正文以状态码开头，JSON 里带 "status":502
+    /^\s*(\d{3})\s*\{/,
+    /"status"\s*:\s*(\d{3})\b/,
   ]
 
   for (const pattern of patterns) {
