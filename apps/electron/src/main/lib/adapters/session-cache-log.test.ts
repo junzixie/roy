@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { computeHitRate, findDivergence, SessionCacheLog } from './session-cache-log'
+import { computeHitRate, createCacheLogExtension, findDivergence, SessionCacheLog } from './session-cache-log'
 
 describe('findDivergence', () => {
   test('纯追加返回 -1', () => {
@@ -94,5 +94,36 @@ describe('SessionCacheLog', () => {
       log.beginRequest({ messages: [{ role: 'user', content: 'a' }] })
       log.complete({ input: 1, cacheRead: 1 })
     }).not.toThrow()
+  })
+})
+
+describe('createCacheLogExtension', () => {
+  test('按 wire payload 记账：system 在 messages 里，工具定义变化单独标出', () => {
+    const log = new SessionCacheLog()
+    let handler: ((event: { payload: unknown }) => unknown) | undefined
+    const fakePi = {
+      on: (_name: string, fn: typeof handler) => { handler = fn },
+    } as unknown as Parameters<ReturnType<typeof createCacheLogExtension>>[0]
+    createCacheLogExtension(log, { mode: 'deepseek-spark' })(fakePi)
+
+    const system = { role: 'system', content: 'SYS' }
+    const user = { role: 'user', content: 'a' }
+    expect(handler!({ payload: { model: 'deepseek-v4.1-flash', messages: [system, user], tools: [{ name: 'bash' }] } })).toBeUndefined()
+    log.complete({ input: 100, cacheRead: 0 })
+
+    handler!({ payload: { model: 'deepseek-v4.1-flash', messages: [system, user, { role: 'assistant', content: 'b' }], tools: [{ name: 'bash' }, { name: 'read' }] } })
+    log.complete({ input: 100, cacheRead: 0 })
+    const record = log.getLastRecord()!
+    expect(record.model).toBe('deepseek-v4.1-flash')
+    expect(record.mode).toBe('deepseek-spark')
+    expect(record.divergedAt).toBe(-1)
+    expect(record.toolsChanged).toBe(true)
+    expect(record.systemChanged).toBeUndefined()
+
+    handler!({ payload: { messages: [{ role: 'system', content: 'SYS2' }, user], tools: [{ name: 'bash' }, { name: 'read' }] } })
+    log.complete({ input: 1 })
+    expect(log.getLastRecord()!.systemChanged).toBe(true)
+    expect(log.getLastRecord()!.divergedAt).toBe(0)
+    expect(log.getLastRecord()!.divergedRole).toBe('system')
   })
 })

@@ -20,7 +20,8 @@
  */
 
 import { appendFileSync } from 'node:fs'
-import { hashValue } from './prefix-bytes'
+import type { ExtensionAPI } from '@earendil-works/pi-coding-agent'
+import { hashValue, stableSerialize } from './prefix-bytes'
 
 export interface CacheLogUsage {
   input?: number
@@ -55,6 +56,10 @@ export interface CacheLogRecord {
   prefixHash: string
   systemHash: string
   toolsHash?: string
+  /** 系统提示词与上一请求不同（缓存从最开头失效） */
+  systemChanged?: true
+  /** 工具定义与上一请求不同（缓存从工具段失效，messages 再一致也命不中） */
+  toolsChanged?: true
   input?: number
   output?: number
   cacheRead?: number
@@ -93,6 +98,8 @@ export function computeHitRate(usage: CacheLogUsage): number | undefined {
 export class SessionCacheLog {
   private seq = 0
   private previousMessageHashes: string[] = []
+  private previousSystemHash?: string
+  private previousToolsHash?: string
   private pending?: {
     record: CacheLogRecord
     messageHashes: string[]
@@ -117,6 +124,10 @@ export class SessionCacheLog {
     const systemHash = hashValue(input.systemPrompt !== undefined ? input.systemPrompt : systemMessagesOf(input.messages))
     const toolsHash = input.tools ? hashValue(input.tools) : undefined
     const prefixHash = hashValue([systemHash, toolsHash ?? '', ...messageHashes.slice(0, -1)])
+    const systemChanged = this.previousSystemHash !== undefined && this.previousSystemHash !== systemHash
+    const toolsChanged = this.previousToolsHash !== undefined && this.previousToolsHash !== toolsHash
+    this.previousSystemHash = systemHash
+    this.previousToolsHash = toolsHash
 
     const record: CacheLogRecord = {
       t: Date.now(),
@@ -130,6 +141,8 @@ export class SessionCacheLog {
       prefixHash,
       systemHash,
       ...(toolsHash ? { toolsHash } : {}),
+      ...(systemChanged ? { systemChanged: true as const } : {}),
+      ...(toolsChanged ? { toolsChanged: true as const } : {}),
     }
     this.pending = { record, messageHashes }
     return record
@@ -181,6 +194,38 @@ export class SessionCacheLog {
     } catch {
       /* 观测失败不能影响对话 */
     }
+  }
+}
+
+/**
+ * 在 wire 层记账：注册在所有改 payload 的扩展**之后**，拿到的就是真正发出去的字节
+ * （推理截断、补偿块都已生效）。Pi 的 transformContext 阶段既看不到这些改写，也拿不到
+ * 系统提示词和工具定义，记在那里会把这两类断点漏掉。
+ *
+ * 覆盖三种 wire 形状：chat-completions 的 `messages[]`（system 在其中）、responses 的
+ * `input[]` + `instructions`、anthropic-messages 的 `messages[]` + `system`。
+ */
+export function createCacheLogExtension(
+  log: SessionCacheLog,
+  meta: { mode?: string } = {},
+): (pi: ExtensionAPI) => void {
+  return (pi) => {
+    pi.on('before_provider_request', (event) => {
+      const payload = event.payload as Record<string, unknown> | null
+      if (!payload || typeof payload !== 'object') return undefined
+      const messages = Array.isArray(payload.messages) ? payload.messages
+        : Array.isArray(payload.input) ? payload.input
+          : []
+      const systemPrompt = payload.system ?? payload.instructions
+      log.beginRequest({
+        ...(typeof payload.model === 'string' ? { model: payload.model } : {}),
+        ...(meta.mode ? { mode: meta.mode } : {}),
+        ...(systemPrompt !== undefined ? { systemPrompt: typeof systemPrompt === 'string' ? systemPrompt : stableSerialize(systemPrompt) } : {}),
+        messages,
+        ...(Array.isArray(payload.tools) ? { tools: payload.tools } : {}),
+      })
+      return undefined
+    })
   }
 }
 

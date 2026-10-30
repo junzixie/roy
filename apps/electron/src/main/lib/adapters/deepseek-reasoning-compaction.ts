@@ -13,6 +13,8 @@
  * 「明确排除」的表述，宁可漏提取，不要误判成排除（误判会让模型放弃本来可行的路径）。
  */
 
+import { hashValue } from './prefix-bytes'
+
 type ProviderPayload = Record<string, unknown>
 
 /** 一条 wire 消息的最小结构（OpenAI 兼容协议的 messages 元素）。 */
@@ -417,6 +419,74 @@ export function injectExcludedPaths(
   }
 
   return appendToMessages() ?? appendToInput() ?? payload
+}
+
+/** 已定稿的补偿块：user 消息内容哈希 → 当初追加的块（'' 表示当初没有锚点） */
+export type PinnedExcludedPaths = Map<string, string>
+
+/** 定稿表上限：只需覆盖仍可能出现在请求里的 user 消息 */
+const MAX_PINNED_USER_MESSAGES = 200
+
+function appendBlockToUserItem(
+  item: Record<string, unknown>,
+  block: string,
+  textPartType: 'text' | 'input_text',
+): Record<string, unknown> | undefined {
+  const content = item.content
+  if (typeof content === 'string') {
+    return alreadyInjected(content) ? undefined : { ...item, content: `${content}\n\n${block}` }
+  }
+  if (Array.isArray(content)) {
+    const parts = content as Array<Record<string, unknown>>
+    if (parts.some((part) => typeof part?.text === 'string' && alreadyInjected(part.text))) return undefined
+    return { ...item, content: [...parts, { type: textPartType, text: block }] }
+  }
+  return undefined
+}
+
+/**
+ * 定稿版的补偿块注入：每条 user 消息的补偿块只在它**首次作为末条**发出时决定一次，
+ * 之后每个请求都按原样补回同一条消息。
+ *
+ * `injectExcludedPaths` 只看末条：同一回合的第二个请求末条已是 toolResult，补偿块随之
+ * 消失，这条 user 消息的字节就变了，前缀缓存每回合都在这里断一次；模型也在回合中途
+ * 丢掉了锚点。这里把决定记进 `pinned`，让字节在整个会话里保持不变。
+ */
+export function pinExcludedPaths(
+  payload: unknown,
+  anchors: readonly string[],
+  pinned: PinnedExcludedPaths,
+): unknown {
+  if (!isProviderPayload(payload)) return payload
+  const field = Array.isArray(payload.messages) ? 'messages' : Array.isArray(payload.input) ? 'input' : undefined
+  if (!field) return payload
+  const items = payload[field] as Array<Record<string, unknown>>
+  const textPartType = field === 'messages' ? 'text' : 'input_text'
+  const keyOf = (item: Record<string, unknown>): string => hashValue(item.content)
+
+  const last = items[items.length - 1]
+  if (last && typeof last === 'object' && last.role === 'user') {
+    const key = keyOf(last)
+    if (!pinned.has(key)) {
+      pinned.set(key, renderExcludedPaths(anchors))
+      if (pinned.size > MAX_PINNED_USER_MESSAGES) {
+        const oldest = pinned.keys().next().value
+        if (oldest !== undefined) pinned.delete(oldest)
+      }
+    }
+  }
+
+  let next: Array<Record<string, unknown>> | undefined
+  items.forEach((item, index) => {
+    if (!item || typeof item !== 'object' || item.role !== 'user') return
+    const block = pinned.get(keyOf(item))
+    if (!block) return
+    const appended = appendBlockToUserItem(item, block, textPartType)
+    if (!appended) return
+    next ??= [...items]
+    next[index] = appended
+  })
+  return next ? { ...payload, [field]: next } : payload
 }
 
 function escapeXml(text: string): string {

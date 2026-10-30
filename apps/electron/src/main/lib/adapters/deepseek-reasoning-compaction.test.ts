@@ -230,3 +230,61 @@ describe('Spark 模式：补签名 + 尾截断 + 锚点联动', () => {
     expect(wire.messages[1]?.content).toContain('缓存 key 不一致')
   })
 })
+
+describe('补偿块定稿：同一条 user 消息的字节在整个会话里不变', () => {
+  type Handler = (event: { payload?: unknown }) => unknown
+  const createBridge = (pinned: Map<string, string>): Handler => {
+    const handlers = new Map<string, Handler>()
+    const fakePi = {
+      on: (name: string, fn: Handler) => {
+        handlers.set(name, fn)
+        return () => {}
+      },
+    } as unknown as Parameters<ReturnType<typeof createDeepSeekReasoningBridgeExtension>>[0]
+    createDeepSeekReasoningBridgeExtension({ pinnedExcludedPaths: pinned })(fakePi)
+    return handlers.get('before_provider_request')!
+  }
+  const send = (handler: Handler, messages: unknown[]) => {
+    const payload = { messages }
+    return ((handler({ payload }) ?? payload) as { messages: Array<{ content: unknown }> }).messages
+  }
+
+  const longThinking = `先试了本地缓存，已经排除了：缓存 key 不一致。${'中间分析。'.repeat(600)}`
+  const history = [
+    { role: 'user', content: '查一下' },
+    { role: 'assistant', content: '', reasoning_content: longThinking },
+  ]
+  const ask = { role: 'user', content: '继续' }
+
+  test('回合内第二个请求（末条已是 toolResult）仍带同一个补偿块', () => {
+    const handler = createBridge(new Map())
+    const first = send(handler, [...history, ask])
+    const second = send(handler, [
+      ...history,
+      ask,
+      { role: 'assistant', content: '', reasoning_content: '短推理', tool_calls: [{ id: 't1' }] },
+      { role: 'tool', tool_call_id: 't1', content: 'ok' },
+    ])
+    expect(String(first[2]!.content)).toContain('<excluded-paths')
+    expect(second[2]!.content).toEqual(first[2]!.content)
+  })
+
+  test('新回合重建扩展后，共享定稿表的旧 user 消息字节不变', () => {
+    const pinned = new Map<string, string>()
+    const first = send(createBridge(pinned), [...history, ask])
+    const nextTurn = send(createBridge(pinned), [
+      ...history,
+      ask,
+      { role: 'assistant', content: '好的' },
+      { role: 'user', content: '下一个问题' },
+    ])
+    expect(nextTurn[2]!.content).toEqual(first[2]!.content)
+  })
+
+  test('首次没有锚点的 user 消息之后也不会被补上', () => {
+    const handler = createBridge(new Map())
+    send(handler, [ask])
+    const later = send(handler, [ask, ...history, { role: 'user', content: '再看看' }])
+    expect(later[0]!.content).toBe('继续')
+  })
+})

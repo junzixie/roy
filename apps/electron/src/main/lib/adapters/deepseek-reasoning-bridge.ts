@@ -19,7 +19,8 @@ import {
   collectAnchorsFromPayload,
   compactRequestReasoning,
   DEFAULT_TRUNCATE_CHARS,
-  injectExcludedPaths,
+  pinExcludedPaths,
+  type PinnedExcludedPaths,
   type ReasoningCompactionSettings,
 } from './deepseek-reasoning-compaction'
 
@@ -81,6 +82,11 @@ export interface DeepSeekReasoningBridgeSettings extends ReasoningCompactionSett
    * 用户按任务定。开启时截断必定同时生效，作为成本护栏。
    */
   restoreSignatures?: boolean
+  /**
+   * 补偿块定稿表。扩展每个用户回合都会重建，定稿表必须由调用方按会话持有并传入，
+   * 否则新回合会丢掉上一回合 user 消息上的补偿块，前缀在那里断开。
+   */
+  pinnedExcludedPaths?: PinnedExcludedPaths
   // injectAnchors 已上移到 ReasoningCompactionSettings（诊断模块也要读它），
   // 这里不再重复声明，避免两处类型各自漂移。
 }
@@ -93,6 +99,8 @@ export function createDeepSeekReasoningBridgeExtension(
   const injectAnchors = settings.injectAnchors !== false
 
   return (pi) => {
+    // 每条 user 消息的补偿块只定一次，之后原样补回，见 pinExcludedPaths
+    const pinned: PinnedExcludedPaths = settings.pinnedExcludedPaths ?? new Map()
     // 默认不补签名：补了就等于开启历史推理回传，那是净增输入成本。
     // 只有用户显式开启时才接管 context。
     if (settings.restoreSignatures === true) {
@@ -112,7 +120,7 @@ export function createDeepSeekReasoningBridgeExtension(
         enabled: settings.enabled,
         truncateChars,
       })
-      const injected = injectAnchors ? injectExcludedPaths(compacted, anchors) : compacted
+      const injected = injectAnchors ? pinExcludedPaths(compacted, anchors, pinned) : compacted
       return injected === event.payload ? undefined : injected
     })
   }

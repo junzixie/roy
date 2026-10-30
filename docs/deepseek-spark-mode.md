@@ -95,6 +95,24 @@ Read 去重、工具结果阈值下调、并行工具调用合并轮次。
 
 - `divergedAt = -1` 表示纯追加（理想）；≥0 表示第 N 条消息字节变了（碎裂点）。
 - `hitRate = cacheRead / (input + cacheRead + cacheWrite)`，与 usage-summary 口径一致。
+- 账本挂在 `before_provider_request` 的最后一个扩展上，记的是推理截断、补偿块生效后的真实
+  wire 字节，并单独标出 `systemChanged` / `toolsChanged`（这两类断点在 messages 层看不到）。
+
+### S5 实测断点（2026-10-31，0.20.26 的 Pi 会话 usage 反推）
+
+按「本次 cacheRead 小于上一请求整段 prompt」判定断点，10-28 至 10-30 的 DeepSeek 长会话里，
+**断点造成的未命中占全部未命中 input 的 50%～90%**；两次断点之间的单请求命中率本来就在 97%+。
+真正的断点分三类（保留比例 90%～99% 的不算：那是快速工具循环里上一请求还没落盘，服务端行为）：
+
+| 断点后 cacheRead | 推断位置 | 处理 |
+| --- | --- | --- |
+| 0 | 系统提示词开头，或服务端换了缓存节点 | 待 wire 账本确认（看 `systemChanged`） |
+| ≈2k | 系统提示词之后的工具定义段 | 待 wire 账本确认（看 `toolsChanged`） |
+| ≈39k（跨会话同值） | 系统提示词 + 工具之后的第一条历史消息 | 待 wire 账本确认（看 `divergedAt`） |
+
+代码审查另发现一处必然断点并已修复：补偿块只追加在「当前末条 user」上，同一回合第二个请求
+末条变成 toolResult 后补偿块消失，这条 user 消息字节改变，每回合断一次。现在每条 user 消息的
+补偿块只在首次发出时定稿（`pinExcludedPaths`），定稿表按会话持有，跨回合不丢。
 
 ## 五、实施顺序
 

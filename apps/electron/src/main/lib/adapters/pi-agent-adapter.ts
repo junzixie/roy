@@ -97,7 +97,8 @@ import { createCodexFastModeExtension, withCodexFastModeServiceTier } from './pi
 import { createDeepSeekReasoningRequestExtension } from './pi-deepseek-reasoning-request-settings'
 import { createDeepSeekOpenAIReasoningExtension } from './pi-deepseek-openai-reasoning-request-settings'
 import { createDeepSeekReasoningBridgeExtension } from './deepseek-reasoning-bridge'
-import { SessionCacheLog } from './session-cache-log'
+import type { PinnedExcludedPaths } from './deepseek-reasoning-compaction'
+import { createCacheLogExtension, SessionCacheLog } from './session-cache-log'
 import { FrozenHistory } from './frozen-history'
 import { getAgentSessionsDir } from '../config-paths'
 import { createOpenAIReasoningRequestExtension } from './pi-openai-reasoning-request-settings'
@@ -1532,6 +1533,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
    * 开始「冻结」，历史照样被重新裁剪。
    */
   private frozenHistoryBySession = new Map<string, FrozenHistory<AgentMessage>>()
+  /** Spark 模式的补偿块定稿表，按会话跨 query 复用（同 frozenHistoryBySession 的理由） */
+  private pinnedExcludedPathsBySession = new Map<string, PinnedExcludedPaths>()
   /** 逐请求缓存账本，按会话复用；只对 deepseek 渠道开启 */
   private cacheLogBySession = new Map<string, SessionCacheLog>()
 
@@ -1543,6 +1546,16 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       this.frozenHistoryBySession.set(sessionId, history)
     }
     return history
+  }
+
+  /** 取（或建）该会话的补偿块定稿表 */
+  private pinnedExcludedPathsFor(sessionId: string): PinnedExcludedPaths {
+    let pinned = this.pinnedExcludedPathsBySession.get(sessionId)
+    if (!pinned) {
+      pinned = new Map()
+      this.pinnedExcludedPathsBySession.set(sessionId, pinned)
+    }
+    return pinned
   }
 
   /** 取（或建）该会话的逐请求缓存账本；路径不可用时退化为仅内存记账 */
@@ -1803,11 +1816,17 @@ export class PiAgentAdapter implements AgentProviderAdapter {
         // 截断长度取模块默认值 2000 字符（约 800 tokens）：常量钉死，会话内不随配置漂移，
         // 否则每轮字节都变，前缀缓存会一直碎。非 Spark 模式保持不注册（行为不变）。
         ...(input.provider === 'deepseek' && input.deepseekOptimized === true
-          ? [createDeepSeekReasoningBridgeExtension({ restoreSignatures: true, injectAnchors: true })]
+          ? [createDeepSeekReasoningBridgeExtension({
+              restoreSignatures: true,
+              injectAnchors: true,
+              pinnedExcludedPaths: this.pinnedExcludedPathsFor(input.sessionId),
+            })]
           : []),
         ...(input.provider === 'openai-codex' && input.codexFastMode
           ? [createCodexFastModeExtension({ fastMode: true })]
           : []),
+        // 账本必须排在最后：它记录的是前面所有扩展改完之后真正发出的字节。
+        ...(cacheLog ? [createCacheLogExtension(cacheLog, sparkMode ? { mode: 'deepseek-spark' } : {})] : []),
       ]
       const resourceLoader = new sdk.DefaultResourceLoader({
         cwd,
@@ -1940,25 +1959,17 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       // 这里只保证「用户选高缓存时字段确实带上」。
       const cacheRetention = resolveCacheRetention(getSettings().promptCacheMode)
       const cacheKey = cacheKeyForSession(session.sessionId)
-      const cachedProviderStreamFn: typeof liveProviderStreamFn = (requestModel, context, options) => {
-        // 账本要在真正写 wire 之前记：此时 context 已经是本轮最终发出的消息数组。
-        cacheLog?.beginRequest({
-          model: requestModel.id,
-          ...(sparkMode ? { mode: 'deepseek-spark' } : {}),
-          messages: context.messages,
-        })
-        return liveProviderStreamFn(
-          requestModel,
-          context,
-          {
-            ...options,
-            cacheRetention,
-            // 会话 ID 作为亲和 key：同一会话的多轮请求尽量落到同一缓存分片。
-            // sessionId 缺失或过长时保持 undefined，退化成服务端按前缀匹配。
-            ...(cacheKey && options?.sessionId === undefined ? { sessionId: cacheKey } : {}),
-          },
-        )
-      }
+      const cachedProviderStreamFn: typeof liveProviderStreamFn = (requestModel, context, options) => liveProviderStreamFn(
+        requestModel,
+        context,
+        {
+          ...options,
+          cacheRetention,
+          // 会话 ID 作为亲和 key：同一会话的多轮请求尽量落到同一缓存分片。
+          // sessionId 缺失或过长时保持 undefined，退化成服务端按前缀匹配。
+          ...(cacheKey && options?.sessionId === undefined ? { sessionId: cacheKey } : {}),
+        },
+      )
       session.agent.streamFunction = (requestModel, context, options) => runWithPiRequestProxy(
         requestProxyDispatcher,
         () => cachedProviderStreamFn(requestModel, context, options),
