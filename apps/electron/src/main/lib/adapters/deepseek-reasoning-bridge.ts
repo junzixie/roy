@@ -81,14 +81,8 @@ export interface DeepSeekReasoningBridgeSettings extends ReasoningCompactionSett
    * 用户按任务定。开启时截断必定同时生效，作为成本护栏。
    */
   restoreSignatures?: boolean
-  /**
-   * 是否把「已排除路径」锚点补回上下文。
-   *
-   * 默认开启：推理尾截断丢掉的前段里，最值得保留的就是「这条路试过了、不行」这类
-   * 排除结论。不补偿的话模型会重复走回头路，省下的 token 又花回去。
-   * 无锚点时零字节差异，不构成额外成本。
-   */
-  injectAnchors?: boolean
+  // injectAnchors 已上移到 ReasoningCompactionSettings（诊断模块也要读它），
+  // 这里不再重复声明，避免两处类型各自漂移。
 }
 
 /** DeepSeek 优化模式的请求链路扩展。 */

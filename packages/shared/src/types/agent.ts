@@ -340,6 +340,14 @@ export interface SDKSystemMessage {
   compact_error?: string
   /** Pi 手动压缩后的上下文 token 预估值 */
   compactionEstimatedTokensAfter?: number
+  /** 压缩触发来源与收益账本，随消息持久化，便于诊断。 */
+  compactionReason?: 'manual' | 'threshold' | 'overflow' | 'idle'
+  compactionContextWindow?: number
+  compactionThresholdTokens?: number
+  compactionStrategy?: 'cache-preserving' | 'balanced' | 'aggressive'
+  compactionTokensBefore?: number
+  compactionTokensReclaimed?: number
+  compactionFixedOverheadTokens?: number
   /** 本次压缩是否紧随一个无需续跑的成功主 Agent turn。 */
   afterCompletedTurn?: boolean
   summary?: string
@@ -510,6 +518,9 @@ export interface AgentEventUsage {
   cacheCreationTokens?: number
   costUsd?: number
   contextWindow?: number
+  /** 窗口来自 Roy 内置能力表/已验证模型目录，而非手填值。 */
+  contextWindowTrusted?: boolean
+  compactionThresholdTokens?: number
   /** token 字段来自最后一次模型调用（真实上下文占用），可直接覆盖显示值 */
   isLastCall?: boolean
 }
@@ -613,13 +624,21 @@ export type AgentEvent =
   // Usage 更新
   | { type: 'usage_update'; usage: AgentEventUsage }
   // 上下文压缩
-  | { type: 'compacting'; afterCompletedTurn?: boolean }
+  | { type: 'compacting'; afterCompletedTurn?: boolean; reason?: 'manual' | 'threshold' | 'overflow' | 'idle'; contextWindow?: number; thresholdTokens?: number; strategy?: 'cache-preserving' | 'balanced' | 'aggressive' }
   | {
     type: 'compact_complete'
     status: 'success' | 'noop' | 'failed'
     summary?: string
     message?: string
     estimatedTokensAfter?: number
+    reason?: 'manual' | 'threshold' | 'overflow' | 'idle'
+    contextWindow?: number
+    thresholdTokens?: number
+    strategy?: 'cache-preserving' | 'balanced' | 'aggressive'
+    tokensBefore?: number
+    tokensAfter?: number
+    tokensReclaimed?: number
+    fixedOverheadTokens?: number
   }
   // 权限请求
   | { type: 'permission_request'; request: PermissionRequest }
@@ -655,7 +674,7 @@ export type RoyEvent =
   | { type: 'plan_mode_changed'; sessionId: string; active: boolean; source: AgentPlanModeChangeSource }
   | { type: 'retry'; status: 'starting' | 'attempt' | 'cleared' | 'failed' | 'cancelled'; attempt?: number; maxAttempts?: number; delaySeconds?: number; reason?: string; attemptData?: RetryAttempt; runStartedAt?: number; scheduledAt?: number; totalAttempt?: number; maxTotalAttempts?: number; error?: TypedError }
   | { type: 'model_resolved'; model: string }
-  | { type: 'context_window'; contextWindow: number }
+  | { type: 'context_window'; contextWindow: number; trustedWindow?: boolean; compactionThresholdTokens?: number }
   | { type: 'permission_mode_changed'; mode: RoyPermissionMode }
   | { type: 'title_updated'; title: string }
   | { type: 'external_run_started'; source: AgentExternalRunSource; sessionId: string; title?: string; workspaceId?: string; modelId?: string; startedAt: number; runGeneration?: number; session?: AgentSessionMeta }
@@ -751,6 +770,37 @@ export interface SetAgentSessionActiveWorktreeInput {
  * 存储在 ~/.roy/agent-sessions.json 中，
  * 类似 ConversationMeta，独立存储。
  */
+/**
+ * 一次上下文压缩的账本记录。
+ *
+ * 主进程每次压缩都会往 `~/.roy/context-ledger/<sessionId>.jsonl` 追加一条，
+ * 但此前**没有任何读取方**——数据写了就沉底，用户完全看不到自己什么时候被压缩过、
+ * 省了多少 token。这里把它提升为共享类型，由 `agent:get-context-ledger` 读出。
+ */
+export interface ContextLedgerEntry {
+  id: string
+  sessionId: string
+  /** 记录时间戳（毫秒） */
+  at: number
+  kind: 'compaction'
+  status: 'started' | 'success' | 'failed' | 'noop'
+  /** 触发原因：手动 / 触达阈值 / 上下文溢出 */
+  reason: 'manual' | 'threshold' | 'overflow'
+  strategy: 'cache-preserving' | 'balanced' | 'aggressive'
+  contextWindow: number
+  thresholdTokens: number
+  tokensBefore?: number
+  tokensAfter?: number
+  tokensReclaimed?: number
+  fixedOverheadTokens?: number
+  keepRecentTokens?: number
+  summaryChars?: number
+  /** 可用于定位 Pi transcript 的稳定引用 */
+  archiveRef?: string
+  error?: string
+}
+
+/** 一次上下文压缩的账本记录。 */
 export interface AgentSessionMeta {
   /** 会话唯一标识 */
   id: string
@@ -1380,6 +1430,11 @@ export interface AgentSendInput {
   triggeredBy?: 'user' | 'automation' | 'delegation' | 'external'
   /** 定时任务执行上下文（注入到系统提示词，用户不可见） */
   automationContext?: string
+  /**
+   * 空闲静默预压缩：不落盘用户消息，走 session.compact()，reason=idle。
+   * 仅主进程内部调度使用，不由渲染进程伪造。
+   */
+  idleCompact?: boolean
 }
 
 // ===== Agent 队列消息 =====
@@ -1896,6 +1951,8 @@ export const AGENT_IPC_CHANNELS = {
   COUNT_ARCHIVED_SESSIONS: 'agent:count-archived-sessions',
   /** 按需获取单个会话的 Pi entry 绑定（侧栏列表不再携带，体积占索引 98%） */
   GET_SESSION_BINDINGS: 'agent:get-session-bindings',
+  /** 读取某会话的上下文压缩账本（每次压缩的 token 变化），供诊断面板展示 */
+  GET_CONTEXT_LEDGER: 'agent:get-context-ledger',
   /** 创建会话 */
   CREATE_SESSION: 'agent:create-session',
   /** 获取当前主进程仍在执行的 Agent 会话快照 */

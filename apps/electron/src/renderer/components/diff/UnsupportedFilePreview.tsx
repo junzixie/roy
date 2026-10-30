@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { FileWarning } from 'lucide-react'
 import type { FileAccessOptions, FilePreviewMetadata } from '@roy/shared'
+import { formatBytes as __sharedFormatBytes } from '@roy/shared'
 import { DefaultAppOpenButton } from './DefaultAppOpenButton'
 
 interface UnsupportedFilePreviewProps {
@@ -8,18 +9,6 @@ interface UnsupportedFilePreviewProps {
   access?: FileAccessOptions
   reason: string
   metadata?: FilePreviewMetadata
-}
-
-function formatFileSize(size: number): string {
-  if (size < 1024) return `${size} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let value = size
-  let index = -1
-  do {
-    value /= 1024
-    index += 1
-  } while (value >= 1024 && index < units.length - 1)
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`
 }
 
 function formatModifiedAt(modifiedAt: number): string {
@@ -54,7 +43,7 @@ export function UnsupportedFilePreview({
             <dt className="text-muted-foreground">类型</dt>
             <dd className="text-foreground">{metadata.extension || '无扩展名'}</dd>
             <dt className="text-muted-foreground">大小</dt>
-            <dd className="tabular-nums text-foreground">{formatFileSize(metadata.size)}</dd>
+            <dd className="tabular-nums text-foreground">{__sharedFormatBytes(metadata.size)}</dd>
             <dt className="text-muted-foreground">修改时间</dt>
             <dd className="tabular-nums text-foreground">{formatModifiedAt(metadata.modifiedAt)}</dd>
           </dl>

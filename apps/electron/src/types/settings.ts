@@ -515,11 +515,30 @@ export interface AppSettings {
    */
   filesPanelDefaultSource?: 'project' | 'session'
   /**
-   * 上下文占用到百分之几时自动静默压缩（默认 80，范围 50-95）。
+   * 上下文占用到百分之几时自动静默压缩（默认 90，范围 50-95；对齐 Claude/Codex 近满再压）。
    *
    * 调低=更早压缩、更省上下文但更容易丢细节；调高=更晚压缩、尽量保留原文。
    */
   autoCompactPercent?: number
+  /**
+   * 提示缓存保留档位（默认 'high'）。
+   *
+   * - 'high'：长缓存（provider 支持时 24h / 1h TTL），并带 `prompt_cache_key`
+   *   让同一会话尽量命中同一缓存分片。
+   * - 'standard'：Pi 的默认短缓存（Anthropic 5 分钟）。
+   * - 'off'：显式关闭。适合按 cache write 额外计费的渠道。
+   *
+   * 已核实：Pi 默认 `cacheRetention='short'`，而 `prompt_cache_key` 只在
+   * `baseUrl 含 api.openai.com` 或 `retention==='long'` 时才发送
+   * 【已核 pi-ai/dist/api/openai-completions.js:578-581】。改动前 Roy 全仓未传过
+   * 该字段，所以非 OpenAI 官方地址上一直没带这个亲和字段。
+   *
+   * 注意：**这不等于「之前没缓存」**。实测 Roy 会话的缓存命中占比已达
+   * 92.93%（357,178,456 / 385M），DSH 为 95.83%，两者都在高缓存区间。
+   * DeepSeek 官方是自动开启的硬盘缓存，不需要该字段也会命中。
+   * 这个开关只影响「是否额外发送亲和标记」，用于进一步稳定命中。
+   */
+  promptCacheMode?: 'high' | 'standard' | 'off'
   /**
    * 启动动画选择。
    *

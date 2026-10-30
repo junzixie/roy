@@ -53,9 +53,9 @@ import { agentLiveMessagesAtomFamily, agentSessionStreamingStateAtomFamily, type
 import { agentRunQueueAtom, workVerbosityAtom } from '@/atoms/work-verbosity'
 
 /** 长会话：先画最近这么多组（一问一答算两组，约 50 轮），往上滚再加载更早的 */
-const INITIAL_RENDER_GROUPS = 100
+const INITIAL_RENDER_GROUPS = 40
 const EMPTY_TASK_ACTIVITIES: never[] = []
-const LOAD_EARLIER_STEP = 60
+const LOAD_EARLIER_STEP = 25
 
 function QueueNotice({ ahead, limit }: { ahead: number; limit: number }): React.ReactElement {
   return (
@@ -138,8 +138,33 @@ export function hasRenderableAssistantTurnContent(group: MessageGroup): boolean 
   return group.type === 'assistant-turn' && group.assistantMessages.some(hasRenderableAssistantMessage)
 }
 
+function formatCompactionLedgerDetail(source: {
+  compactionReason?: 'manual' | 'threshold' | 'overflow' | 'idle'
+  compactionThresholdTokens?: number
+  compactionTokensBefore?: number
+  compactionTokensReclaimed?: number
+  compactionFixedOverheadTokens?: number
+}): string | undefined {
+  const parts: string[] = []
+  if (source.compactionReason) {
+    const reason = source.compactionReason === 'manual' ? '手动' : source.compactionReason === 'overflow' ? '上下文溢出恢复' : source.compactionReason === 'idle' ? '空闲预整理' : '达到自动阈值'
+    parts.push(reason)
+  }
+  const fmt = (value: number): string => `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(value / 1000)}K`
+  if (typeof source.compactionTokensBefore === 'number') parts.push(`压缩前 ${fmt(source.compactionTokensBefore)}`)
+  if (typeof source.compactionTokensReclaimed === 'number') parts.push(`释放 ${fmt(source.compactionTokensReclaimed)}`)
+  if (typeof source.compactionThresholdTokens === 'number') parts.push(`阈值 ${fmt(source.compactionThresholdTokens)}`)
+  if (typeof source.compactionFixedOverheadTokens === 'number') parts.push(`固定提示/工具约 ${fmt(source.compactionFixedOverheadTokens)}`)
+  return parts.length ? parts.join(' · ') : undefined
+}
+
 export function shouldRenderLiveAssistantTurn(group: MessageGroup, isLive: boolean): boolean {
   return !isLive || group.type !== 'assistant-turn' || hasRenderableAssistantTurnContent(group)
+}
+
+
+function isAutoCompactionReason(reason: string | undefined): boolean {
+  return reason === 'threshold' || reason === 'overflow' || reason === 'idle'
 }
 
 export function getContextCompactionProgress(
@@ -163,21 +188,33 @@ export function getContextCompactionProgress(
     })
 
   if (streamCompaction?.status === 'running') {
+    // 对齐 Claude/Codex：自动阈值/溢出压缩静默进行，只保留角标 spinner；手动 /compact 仍提示。
+    if (isAutoCompactionReason(streamCompaction.reason)) return undefined
     return {
       status: 'running',
       label: '正在整理上下文',
-      detail: '正在生成会话摘要，完成后可继续当前任务。',
+      detail: streamCompaction.reason === 'manual'
+        ? '正在生成会话摘要（手动触发）。'
+        : '正在生成会话摘要，完成后可继续当前任务。',
     }
   }
   if (streamCompaction?.status === 'success' && !hasResumedWork) {
+    if (isAutoCompactionReason(streamCompaction.reason)) return undefined
     return {
       status: 'success',
       label: '上下文已压缩',
-      detail: '会话已整理，可以继续当前任务。',
+      detail: [formatCompactionLedgerDetail({
+        compactionReason: streamCompaction.reason,
+        compactionThresholdTokens: streamCompaction.thresholdTokens,
+        compactionTokensBefore: streamCompaction.tokensBefore,
+        compactionTokensReclaimed: streamCompaction.tokensReclaimed,
+        compactionFixedOverheadTokens: streamCompaction.fixedOverheadTokens,
+      }), '会话已整理，可以继续当前任务。'].filter(Boolean).join(' · '),
       summary: streamCompaction.summary,
     }
   }
   if (streamCompaction?.status === 'noop' && !hasResumedWork) {
+    if (isAutoCompactionReason(streamCompaction.reason)) return undefined
     return {
       status: 'noop',
       label: '当前上下文无需压缩',
@@ -194,14 +231,16 @@ export function getContextCompactionProgress(
   if (hasResumedWork) return undefined
 
   if (status === 'success' && latestStatus) {
+    if (isAutoCompactionReason((latestStatus as { compactionReason?: string }).compactionReason)) return undefined
     return {
       status: 'success',
       label: '上下文已压缩',
-      detail: '会话已整理，可以继续当前任务。',
+      detail: [formatCompactionLedgerDetail(latestStatus), '会话已整理，可以继续当前任务。'].filter(Boolean).join(' · '),
       summary: latestStatus.summary,
     }
   }
   if (status === 'noop' && latestStatus) {
+    if (isAutoCompactionReason((latestStatus as { compactionReason?: string }).compactionReason)) return undefined
     return {
       status: 'noop',
       label: '当前上下文无需压缩',
@@ -216,6 +255,9 @@ export function getContextCompactionProgress(
     }
   }
   if (status === 'compacting' || isCompacting) {
+    const reason = streamCompaction?.reason
+      ?? (latestStatus as { compactionReason?: string } | undefined)?.compactionReason
+    if (isAutoCompactionReason(reason)) return undefined
     return {
       status: 'running',
       label: '正在整理上下文',

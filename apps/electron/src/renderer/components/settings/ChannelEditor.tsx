@@ -247,9 +247,11 @@ export function ChannelEditor({ draft: initial, onSave, onAutoSaveModels, onCanc
   }
 
   const fetchList = async (): Promise<void> => {
+    if (!keyLoaded) return void toast.error('密钥还在读取，稍后再点')
     if (!d.baseUrl.trim()) return void toast.error('请先填 Base URL')
     if (!d.apiKey.trim()) return void toast.error('请先填 API Key')
     setFetching(true)
+    setRemote(null)
     try {
       const result = await window.electronAPI.fetchModels({ provider: d.provider, baseUrl: d.baseUrl.trim(), apiKey: d.apiKey.trim() })
       if (!result.success) {
@@ -257,6 +259,7 @@ export function ChannelEditor({ draft: initial, onSave, onAutoSaveModels, onCanc
       } else {
         setRemote(result.models)
         if (!result.models.length) toast('这个地址返回了空的模型列表，可以手动添加')
+        else toast.success(`拉到 ${result.models.length} 个模型，勾选后加入上方列表`)
       }
     } catch (error) {
       toast.error(`拉取失败：${error instanceof Error ? error.message : String(error)}`)
@@ -471,7 +474,7 @@ export function ChannelEditor({ draft: initial, onSave, onAutoSaveModels, onCanc
             <PlugZap size={13} />
             全部测试
           </button>
-          <button type="button" className={btnClass} onClick={() => void fetchList()} disabled={fetching}>
+          <button type="button" className={btnClass} onClick={() => void fetchList()} disabled={fetching || !keyLoaded}>
             {fetching ? <Loader2 size={13} className="animate-spin" /> : <RefreshCw size={13} />}
             从接口拉取模型列表
           </button>

@@ -50,9 +50,13 @@ describe('只说不做识别', () => {
     const m = convertPiMessage(assistant([{ type: 'thinking', thinking: t }, { type: 'text', text: t }]), 's') as unknown as { message: { content: { type: string }[] } }
     expect(m.message.content.map((b) => b.type)).toEqual(['thinking'])
   })
-  test('思考把输出上限吃光', () => {
+    test('思考把输出上限吃光或正文被截断', () => {
     expect(detectStalledTurn(assistant([{ type: 'thinking', thinking: 'long plan...' }], 'length'))).toBe('thought-overflow')
-    expect(detectStalledTurn(assistant([{ type: 'thinking', thinking: 'x' }, { type: 'text', text: 'a'.repeat(500) }], 'length'))).toBeUndefined()
+    expect(detectStalledTurn(assistant([{ type: 'thinking', thinking: 'x' }, { type: 'text', text: 'a'.repeat(500) }], 'length'))).toBe('output-truncated')
+    expect(detectStalledTurn(assistant([{ type: 'text', text: '今天天气不错。' }], 'length'))).toBeUndefined()
+    expect(detectStalledTurn(assistant([{ type: 'text', text: '半截答复' }], 'length'))).toBeUndefined()
+    expect(detectStalledTurn(assistant([{ type: 'text', text: '下面分三点说明，第一点是关于缓存策略，' }], 'length'))).toBe('output-truncated')
+    expect(isInternalStallNudge(buildStallNudge('output-truncated'))).toBe(true)
   })
   test('上游返回空 end_turn 算卡住，不报成功', () => {
     expect(detectStalledTurn(assistant([]))).toBe('empty-output')

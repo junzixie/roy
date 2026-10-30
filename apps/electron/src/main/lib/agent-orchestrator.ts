@@ -48,6 +48,16 @@ import { getMainRepoRoot } from './git-diff-service'
 import { getPiAssistantErrorDetails, hasPiAssistantTextContent, stripPiAssistantError } from './adapters/pi-message-adapter'
 import { friendlyErrorMessage, isPromptTooLongError, isThinkingSignatureError, mapAgentErrorToTypedError } from './agent-error-utils'
 import { getActiveRunRejectionMessage, shouldPersistInitialUserMessage } from './agent-send-message-policy'
+import {
+  createIdlePrecompactScheduler,
+  type IdlePrecompactSchedulePayload,
+} from './idle-precompaction-scheduler'
+import {
+  shouldScheduleIdlePrecompact,
+  resolveIdlePrecompactDelayMs,
+  calculatePiAutoCompactionThresholdTokens,
+  normalizeCompactionPercent,
+} from '@roy/shared'
 import { isSessionNotFoundError } from './error-patterns'
 import { AgentEventBus } from './agent-event-bus'
 import { isStaleActiveQueueError } from './agent-queue-routing'
@@ -104,7 +114,7 @@ import { accountSessionToken } from './roy-account'
  * 解耦 Electron webContents，使 Orchestrator 可独立测试。
  * agent-service.ts 负责将这些回调绑定到 webContents.send()。
  */
-type AgentRunInput = AgentSendInput & { runGeneration?: number }
+type AgentRunInput = AgentSendInput & { runGeneration?: number; idleCompact?: boolean }
 
 export interface SessionCallbacks {
   /** 发送流式错误 */
@@ -235,6 +245,13 @@ export class AgentOrchestrator {
   private adapter: AgentProviderAdapter
   private eventBus: AgentEventBus
   private activeSessions = new Map<string, number>()
+  /** 空闲静默预压缩：回合结束后预约，发消息时取消/让路 */
+  private idlePrecompactScheduler = createIdlePrecompactScheduler({
+    isSessionBusy: (sessionId) => this.activeSessions.has(sessionId),
+    run: (payload) => { void this.executeIdlePrecompact(payload) },
+  })
+  private idlePrecompactRunner: ((payload: IdlePrecompactSchedulePayload) => void | Promise<void>) | null = null
+
   /** 占着「同时运行」名额的会话；不在 activeSessions 里的自动视为已释放 */
 
   private activeSessionStartedAt = new Map<string, number>()
@@ -749,6 +766,98 @@ export class AgentOrchestrator {
    * 核心编排方法，从 agent-service.ts 的 runAgent 提取。
    * 通过 EventBus 分发 AgentEvent，通过 callbacks 发送控制信号。
    */
+
+  /** agent-service 注册：真正拉起静默 compact 跑（需重挂 webContents 转发）。 */
+  setIdlePrecompactRunner(runner: ((payload: IdlePrecompactSchedulePayload) => void | Promise<void>) | null): void {
+    this.idlePrecompactRunner = runner
+  }
+
+  cancelIdlePrecompact(sessionId: string): void {
+    this.idlePrecompactScheduler.cancel(sessionId)
+  }
+
+  isIdlePrecompactRunning(sessionId: string): boolean {
+    return this.idlePrecompactScheduler.isRunning(sessionId)
+  }
+
+  private async waitForSessionIdle(sessionId: string, timeoutMs = 8_000): Promise<boolean> {
+    const start = Date.now()
+    while (Date.now() - start < timeoutMs) {
+      if (!this.activeSessions.has(sessionId)) return true
+      await new Promise((r) => setTimeout(r, 100))
+    }
+    return !this.activeSessions.has(sessionId)
+  }
+
+  private scheduleIdlePrecompactFromTurn(options: {
+    sessionId: string
+    channelId: string
+    modelId?: string
+    workspaceId?: string
+    contextTokens?: number
+    contextWindow?: number
+    thresholdTokens?: number
+    trustedWindow?: boolean
+    skipped?: boolean
+  }): void {
+    if (options.skipped) return
+    const contextTokens = options.contextTokens
+    const contextWindow = options.contextWindow
+    if (contextTokens == null || contextWindow == null || contextTokens <= 0 || contextWindow <= 0) return
+    const formalThresholdTokens = options.thresholdTokens
+      ?? (() => {
+        // 兜底必须和 pi-agent-adapter 用同一套推导，否则「本次运行还没发生过压缩」
+        // 时正式线会按写死的 90% 算，而用户设的可能是 70%——空闲预压缩的水位与
+        // 延迟档位（1.5s / 45s）就都按错的线判断。
+        const percent = normalizeCompactionPercent(getSettings().autoCompactPercent)
+        // 预设档位（90/80/70）走 strategy，其余走精确比例；与 adapter 保持一致。
+        const strategyPreset = percent === 90 || percent === 80 || percent === 70
+        const strategy = percent === 90 ? 'cache-preserving' : percent === 70 ? 'aggressive' : 'balanced'
+        return calculatePiAutoCompactionThresholdTokens(
+          contextWindow,
+          strategyPreset ? undefined : percent / 100,
+          { trustedWindow: options.trustedWindow === true, strategy },
+        )
+      })()
+    if (!shouldScheduleIdlePrecompact({
+      contextTokens,
+      contextWindow,
+      formalThresholdTokens,
+      trustedWindow: options.trustedWindow === true,
+    })) return
+    const delayMs = resolveIdlePrecompactDelayMs(contextTokens, formalThresholdTokens)
+    this.idlePrecompactScheduler.schedule({
+      sessionId: options.sessionId,
+      channelId: options.channelId,
+      modelId: options.modelId,
+      workspaceId: options.workspaceId,
+      contextTokens,
+      contextWindow,
+      formalThresholdTokens,
+      trustedWindow: options.trustedWindow === true,
+      delayMs,
+    })
+    console.log(
+      `[Agent 编排] 已预约空闲预压缩: session=${options.sessionId.slice(0, 8)} tokens=${contextTokens}`
+      + ` watermark/threshold 延迟=${delayMs}ms`,
+    )
+  }
+
+  private async executeIdlePrecompact(payload: IdlePrecompactSchedulePayload): Promise<void> {
+    if (this.activeSessions.has(payload.sessionId)) return
+    if (!this.idlePrecompactRunner) {
+      console.warn('[Agent 编排] 空闲预压缩 runner 未注册，跳过')
+      return
+    }
+    this.idlePrecompactScheduler.markRunning(payload.sessionId)
+    try {
+      await this.idlePrecompactRunner(payload)
+    } finally {
+      this.idlePrecompactScheduler.markFinished(payload.sessionId)
+    }
+  }
+
+
   async sendMessage(
     input: AgentRunInput,
     callbacks: SessionCallbacks,
@@ -800,8 +909,15 @@ export class AgentOrchestrator {
     }
 
     // 0. 并发保护
+    this.cancelIdlePrecompact(sessionId)
+    // 空闲预压缩让路：用户发消息时中止正在跑的静默 compact，再继续本轮。
+    if (this.isIdlePrecompactRunning(sessionId) && !input.idleCompact) {
+      console.log(`[Agent 编排] 用户发消息，中止空闲预压缩以让路: ${sessionId.slice(0, 8)}`)
+      this.stop(sessionId)
+      await this.waitForSessionIdle(sessionId)
+    }
     const hasActiveRun = this.activeSessions.has(sessionId)
-    const shouldPersistUserMessage = shouldPersistInitialUserMessage({ hasActiveRun, retryOfErrorUuid })
+    const shouldPersistUserMessage = !input.idleCompact && shouldPersistInitialUserMessage({ hasActiveRun, retryOfErrorUuid })
     if (hasActiveRun) {
       // 并发请求没有真正启动新的 Agent run，绝不能把它当作新用户输入写入 JSONL。
       // 尤其在用户点击停止后、底层 query 尚未完全退出的短暂窗口内，否则同一条
@@ -1239,7 +1355,7 @@ export class AgentOrchestrator {
 
       const contextualMessage = [dynamicCtx, enrichedMessage].filter(Boolean).join('\n\n')
 
-      const isCompactCommand = userMessage.trim() === '/compact'
+      const isCompactCommand = input.idleCompact === true || userMessage.trim() === '/compact'
       const finalPrompt = isCompactCommand
         ? '/compact'
         : existingSdkSessionId
@@ -1737,7 +1853,14 @@ export class AgentOrchestrator {
         console.log(`[Agent 编排] SDK 确认模型: ${resolvedModel}`)
         this.eventBus.emit(sessionId, { kind: 'roy_event', event: { type: 'model_resolved', model: resolvedModel } })
       }
-      const handleContextWindow = (cw: number): void => {
+      let lastContextTokens: number | undefined
+      let lastContextWindow: number | undefined
+      let lastContextWindowTrusted = false
+      let lastCompactionThresholdTokens: number | undefined
+      const handleContextWindow = (cw: number, trustedWindow = false, compactionThresholdTokens?: number): void => {
+              lastContextWindow = cw
+              lastContextWindowTrusted = trustedWindow === true
+              if (typeof compactionThresholdTokens === 'number') lastCompactionThresholdTokens = compactionThresholdTokens
         // 只做兜底，不取大：Math.max 会把「渠道实际返回的窗口」抬到推断值，
         // 导致日志和进度环显示一个模型根本不具备的窗口，压缩阈值也据此算错。
         // 推断值只在调用方没给窗口时补位。
@@ -1748,7 +1871,7 @@ export class AgentOrchestrator {
         // 覆盖流式过程中按模型名推断的 fallback 值（智谱等端点会把 [1m] 等后缀剥掉，导致 fallback 不准）
         this.eventBus.emit(sessionId, {
           kind: 'roy_event',
-          event: { type: 'context_window', contextWindow },
+          event: { type: 'context_window', contextWindow, trustedWindow, compactionThresholdTokens },
         })
       }
       const piCustomTools = [...piBuiltinTools, ...piMcpTools, ...(extensions.piCustomTools ?? [])]
@@ -1803,7 +1926,7 @@ export class AgentOrchestrator {
         } : {}),
         ...(mentionedSkills?.length ? { skillMentions: mentionedSkills } : {}),
         onSkillActivated: recordSkillActivation,
-        ...(isCompactCommand ? { compactRequest: true } : {}),
+        ...(isCompactCommand ? { compactRequest: true, compactRequestReason: input.idleCompact ? 'idle' as const : 'manual' as const } : {}),
         ...(sessionMeta?.codexFastMode && channel.provider === 'openai-codex' ? { codexFastMode: true } : {}),
         ...(codexOAuthCredentials && {
           codexOAuthCredentials,
@@ -2155,6 +2278,16 @@ export class AgentOrchestrator {
             // Turn 结束时：持久化累积消息
             if (msg.type === 'result') {
               capturedResultSubtype = (msg as { subtype?: string }).subtype
+              const contextUsage = (msg as { context_usage?: {
+                input_tokens?: number
+                cache_read_input_tokens?: number
+                cache_creation_input_tokens?: number
+              } }).context_usage
+              if (contextUsage) {
+                lastContextTokens = (contextUsage.input_tokens ?? 0)
+                  + (contextUsage.cache_read_input_tokens ?? 0)
+                  + (contextUsage.cache_creation_input_tokens ?? 0)
+              }
               // Pi result 的 errors[] 携带真实错误原因，透传到前端展示具体错误。
               const rawResultErrors = (msg as { errors?: unknown }).errors
               capturedResultErrors = Array.isArray(rawResultErrors)
@@ -2261,6 +2394,19 @@ export class AgentOrchestrator {
 
           // 发送完成信号
           completeRun(completionMessages(), { stoppedByUser: wasStoppedByUser, startedAt: streamStartedAt, resultSubtype: capturedResultSubtype, resultErrors: capturedResultErrors })
+          if (!wasStoppedByUser && !input.idleCompact && capturedResultSubtype === 'success') {
+            this.scheduleIdlePrecompactFromTurn({
+              sessionId,
+              channelId,
+              modelId: modelId || selectedModelId,
+              workspaceId,
+              contextTokens: lastContextTokens,
+              contextWindow: lastContextWindow,
+              thresholdTokens: lastCompactionThresholdTokens,
+              trustedWindow: lastContextWindowTrusted,
+            })
+          }
+
 
           return
 
@@ -2593,6 +2739,8 @@ export class AgentOrchestrator {
     this.adapter.dispose()
     this.activeSessions.clear()
     this.activeSessionStartedAt.clear()
+    this.idlePrecompactScheduler.dispose()
+
     this.sessionPermissionModes.clear()
     this.stoppedBeforeRunSessions.clear()
     this.queuedMessageUuids.clear()

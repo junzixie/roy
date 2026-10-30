@@ -12,9 +12,10 @@
 import * as React from 'react'
 import { useAtomValue, useSetAtom } from 'jotai'
 import { activeViewAtom } from '@/atoms/active-view'
-import { Loader2, Minimize2 } from 'lucide-react'
+import { ChevronDown, History, Loader2, Minimize2 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { ContextLedgerPanel } from './ContextLedgerPanel'
 import { inputToolbarButtonClass } from '@/components/ai-elements/input-toolbar-styles'
 import { preventHoverPopoverFocusRestore } from '@/components/ai-elements/input-toolbar-popover-focus'
 import { agentSessionViewStreamStateAtomFamily } from '@/atoms/agent-atoms'
@@ -22,8 +23,6 @@ import { cn } from '@/lib/utils'
 import {
   calculatePiAutoCompactionThresholdTokens,
   normalizeCompactionPercent,
-  PI_AUTO_COMPACTION_MAX_PERCENT,
-  PI_AUTO_COMPACTION_MIN_PERCENT,
   type ChannelPlanQuotaWindow,
   type ProviderType,
 } from '@roy/shared'
@@ -201,6 +200,7 @@ export function ContextUsageBadge({
   const displayCacheReadTokens = sessionId ? sessionStreamState.cacheReadTokens : cacheReadTokens
   const displayCacheCreationTokens = sessionId ? sessionStreamState.cacheCreationTokens : cacheCreationTokens
   const displayContextWindow = sessionId ? sessionStreamState.contextWindow : contextWindow
+  const displayContextWindowTrusted = sessionId != null && sessionStreamState.contextWindowTrusted === true
   const displayIsEstimated = sessionId
     ? sessionStreamState.contextUsageIsEstimated === true
     : isEstimated === true
@@ -258,6 +258,8 @@ export function ContextUsageBadge({
 
   // 二次确认压缩状态：第一次点击进入确认态，再次点击才触发压缩
   const [confirming, setConfirming] = React.useState(false)
+  /** 压缩历史折叠区；默认收起，避免每次 hover 都读一次账本文件 */
+  const [showHistory, setShowHistory] = React.useState(false)
 
   // 确认态超时后自动重置，避免按钮长时间停留在确认态
   React.useEffect(() => {
@@ -289,33 +291,21 @@ export function ContextUsageBadge({
 
   const setActiveView = useSetAtom(activeViewAtom)
   const [today, setToday] = React.useState<TodayUsage | null>(null)
-  const [autoPercent, setAutoPercent] = React.useState<number>(80)
+  const [autoPercent, setAutoPercent] = React.useState<number>(90)
   React.useEffect(() => {
     if (!open) return
     let cancelled = false
     void loadTodayUsage().then((v) => { if (!cancelled) setToday(v) }).catch(() => undefined)
     void window.electronAPI.getSettings().then((st) => {
-      if (!cancelled) setAutoPercent(normalizeCompactionPercent((st as { autoCompactPercent?: number }).autoCompactPercent))
+      if (cancelled) return
+      // 只读显示，不改写设置：角标是「看用量」的地方，用户打开一次就把
+      // 自己手改过的压缩阈值悄悄改回 90% 是不可接受的行为。
+      // 归一化到 90% 的迁移逻辑放在设置页（CompactionExperienceCard）里做，
+      // 那里才是用户预期会改动配置的地方。
+      setAutoPercent(normalizeCompactionPercent((st as { autoCompactPercent?: number }).autoCompactPercent))
     }).catch(() => undefined)
     return () => { cancelled = true }
   }, [open])
-
-  const saveTimerRef = React.useRef<number | null>(null)
-  const updateAutoPercent = React.useCallback((next: number): void => {
-    const value = normalizeCompactionPercent(next)
-    setAutoPercent(value)
-    // 拖动时只保存最后一个值
-    if (saveTimerRef.current != null) window.clearTimeout(saveTimerRef.current)
-    saveTimerRef.current = window.setTimeout(() => {
-      saveTimerRef.current = null
-      void window.electronAPI.updateSettings({ autoCompactPercent: value }).catch((error: unknown) => {
-        console.error('[压缩设置] 保存失败:', error)
-      })
-    }, 300)
-  }, [])
-  React.useEffect(() => () => {
-    if (saveTimerRef.current != null) window.clearTimeout(saveTimerRef.current)
-  }, [])
 
   // 压缩中 → 按钮位置显示 spinner
   if (displayIsCompacting) {
@@ -346,7 +336,10 @@ export function ContextUsageBadge({
 
   // 警告阈值：Pi 在自动压缩阈值的 80% 时预警。
   const compactThreshold = displayWindow
-    ? calculatePiAutoCompactionThresholdTokens(displayWindow, autoPercent / 100)
+    ? (sessionId ? sessionStreamState.compactionThresholdTokens : undefined)
+      ?? calculatePiAutoCompactionThresholdTokens(displayWindow, autoPercent / 100, {
+      trustedWindow: displayContextWindowTrusted,
+    })
     : undefined
   const isWarning = compactThreshold && tokens
     ? tokens / compactThreshold >= WARNING_RATIO
@@ -414,8 +407,11 @@ export function ContextUsageBadge({
           </div>
           <p className="mt-2 text-[11.5px] leading-[1.6] text-muted-foreground">
             {tokens
-              ? `每一步都会把这 ${formatTokens(tokens)} token 的上下文重新发给 ${model}，越长越慢越贵。用到 ${autoPercent}% 后会自动压缩。`
-              : `这个会话还没有用量数据，发一条消息后显示。用到 ${autoPercent}% 后会自动压缩。`}
+              ? `每一步都会把这 ${formatTokens(tokens)} token 的上下文重新发给 ${model}，越长越慢越贵。`
+              : '这个会话还没有用量数据，发一条消息后显示。'}
+            {compactThreshold
+              ? ` 当前压缩线约 ${formatTokens(compactThreshold)} token（${autoPercent}%${displayContextWindowTrusted ? ' 的已确认窗口' : ' 的保守有效窗口'}）。`
+              : ` 当前压缩策略：${autoPercent}%。`}
           </p>
           {!displayIsEstimated && (displayCacheRead || displayOutput) ? (
             <p className="mt-1 text-[11px] text-muted-foreground/80 tabular-nums">
@@ -461,23 +457,10 @@ export function ContextUsageBadge({
           </div>
         ) : null}
 
-        <div className="border-t border-border/70 px-4 py-2.5">
-          <div className="flex items-center justify-between gap-3">
-            <span className="text-[12.5px] text-foreground/80">自动静默压缩</span>
-            <span className="text-[12px] tabular-nums text-muted-foreground">用到 {autoPercent}% 时</span>
-          </div>
-          <input
-            type="range"
-            aria-label="自动静默压缩比例"
-            min={PI_AUTO_COMPACTION_MIN_PERCENT}
-            max={PI_AUTO_COMPACTION_MAX_PERCENT}
-            step={1}
-            value={autoPercent}
-            onChange={(event) => updateAutoPercent(Number(event.target.value))}
-            className="mt-1.5 w-full accent-[hsl(var(--primary))]"
-          />
-          <p className="mt-0.5 text-[11px] text-muted-foreground/80">
-            一轮做完后自动把前面的对话压成摘要；越低越早压缩、越省上下文，越高越保留原文。下一步起生效。
+                <div className="border-t border-border/70 px-4 py-2.5">
+          <div className="text-[12.5px] font-medium text-foreground">自动静默压缩 · 保留缓存 · 90%</div>
+          <p className="mt-1 text-[11px] leading-relaxed text-muted-foreground/80">
+            窗口快满时后台静默整理，不是自己清缓存。对齐 Claude / Codex。角标转圈即表示正在整理。
           </p>
         </div>
 
@@ -520,6 +503,24 @@ export function ContextUsageBadge({
           >
             {compactQueued ? '取消排队' : isProcessing ? '本轮后压缩' : confirming ? '确认压缩' : '立即压缩'}
           </Button>
+        </div>
+
+        {/* 压缩历史：账本一直有写、此前没有读入口，这里补上 */}
+        <div className="border-t border-border/60">
+          <button
+            type="button"
+            className="flex w-full items-center gap-1.5 px-4 py-2 text-left text-[11.5px] text-muted-foreground transition-colors hover:text-foreground"
+            onClick={() => setShowHistory((prev) => !prev)}
+          >
+            <History className="size-3" />
+            压缩历史
+            <ChevronDown className={cn('ml-auto size-3 transition-transform', showHistory && 'rotate-180')} />
+          </button>
+          {showHistory && (
+            <div className="max-h-56 overflow-y-auto pb-2">
+              <ContextLedgerPanel sessionId={sessionId} open={showHistory && open} />
+            </div>
+          )}
         </div>
       </PopoverContent>
     </Popover>

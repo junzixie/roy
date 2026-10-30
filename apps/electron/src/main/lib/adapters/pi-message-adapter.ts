@@ -237,7 +237,7 @@ const PROMISE_TAIL_RE = /(?:\blet me\b|\blet's\b|\bi(?:'ll| will)\b|\bnow (?:che
  */
 const COMPLETION_TAIL_RE = /(?:已完成|全部完成|都做完了|全部做完|结论|总结如下|以上|没有(?:其他|别的|剩余)|无其他|待办|遗留|如有需要|如果需要|需要的话|请说|你定|由你决定)/
 
-export type StalledTurnKind = 'leaked-tool-markup' | 'echoed-thinking' | 'promise-only' | 'thought-overflow' | 'empty-output'
+export type StalledTurnKind = 'leaked-tool-markup' | 'echoed-thinking' | 'promise-only' | 'thought-overflow' | 'output-truncated' | 'empty-output'
 
 /**
  * 一轮正常结束（stopReason=stop）但没有结构化工具调用时，判断是不是「卡住了」：
@@ -247,15 +247,35 @@ export type StalledTurnKind = 'leaked-tool-markup' | 'echoed-thinking' | 'promis
  * - 整轮没有任何文本、思考或工具调用（上游返回空 end_turn）
  * 照 FeiBo 的做法，这种情况提醒模型一次去真正调用工具，而不是当成任务完成。
  */
+/** 正文是否像被 max_tokens 截断（而不是完整短答被误标 length） */
+function looksOutputTruncated(body: string): boolean {
+  const text = body.trim()
+  if (!text) return true
+  // 明确完整收尾
+  if (/[。！？.!?]["'”’）)\]]*$/.test(text)) return false
+  if (/```\s*$/.test(text)) return false
+  // 悬空标点/连接词：像话没说完（优先于短答豁免）
+  if (text.length >= 16 && /[，,；;：:、]$/.test(text)) return true
+  if (text.length >= 16 && /(以及|并且|例如|比如|包括|如下)$/.test(text)) return true
+  // 短答即使没句号也不续写（Sol 等渠道常误报 length，续写会把全文再贴一遍）
+  if (text.length < 80) return false
+  // 较长却无终标 → 像被截断
+  return text.length >= 200
+}
+
 export function detectStalledTurn(message: AgentMessage | undefined): StalledTurnKind | undefined {
   if (!message || !isAssistantPiMessage(message)) return undefined
   if (message.content.some((b) => b.type === 'toolCall')) return undefined
   if (['stop', 'length', 'toolUse'].includes(message.stopReason) && hasLeakedToolMarkup(message.content.filter(b => b.type === 'text').map(b => b.text).join(''))) return 'leaked-tool-markup'
-  // 输出上限被思考吃光，正文几乎没有
+  // 输出上限：思考吃光 → thought-overflow；正文看起来被截断 → 自动续写一轮
+  // 注意：部分渠道（如 gpt-*-sol）会误报 stopReason=length；完整短答不要续写，
+  // 否则模型常把整段答复再写一遍，同一气泡里正文翻倍。
   if ((message.stopReason as string) === 'length') {
     const body = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim()
     const thought = message.content.filter((b) => b.type === 'thinking').map((b) => b.thinking).join('').trim()
-    return thought.length > 0 && body.length < 200 ? 'thought-overflow' : undefined
+    if (thought.length > 0 && body.length < 200) return 'thought-overflow'
+    if (looksOutputTruncated(body)) return 'output-truncated'
+    return undefined
   }
   if (message.stopReason !== 'stop') return undefined
   const text = message.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim()
@@ -290,6 +310,9 @@ export function cleanStalledAssistant(message: AssistantMessage): AssistantMessa
 export function buildStallNudge(kind: StalledTurnKind): string {
   if (kind === 'thought-overflow') {
     return `<${ROY_STALL_NUDGE_TAG}>（系统提示）你上一轮的思考太长，把输出上限用完了，没有给出答复或工具调用。不要再完整规划整个任务：只想清楚第一步，然后立刻调用工具去做；如果已经能回答，就直接简短回答。</${ROY_STALL_NUDGE_TAG}>`
+  }
+  if (kind === 'output-truncated') {
+    return `<${ROY_STALL_NUDGE_TAG}>（系统提示）你上一轮因输出上限被截断，答复不完整。请从断点直接续写：不要重复已输出内容，不要重新开场；需要工具就立刻调用，否则把剩余结论写完。</${ROY_STALL_NUDGE_TAG}>`
   }
   if (kind === 'empty-output') {
     return `<${ROY_STALL_NUDGE_TAG}>（系统提示）你上一轮返回了空内容：没有任何正文、思考或工具调用，用户什么也没收到。请直接继续当前任务：需要执行就调用工具，已经能回答就给出简短结论。不要只输出空白。</${ROY_STALL_NUDGE_TAG}>`

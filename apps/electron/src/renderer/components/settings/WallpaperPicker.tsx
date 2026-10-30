@@ -26,6 +26,8 @@ interface WorkshopItem {
   file: string
   path: string
   kind: 'video' | 'scene'
+  /** 封面图 URL（roy-file://）；没有封面时为空串 */
+  preview: string
 }
 
 /** 系统自带壁纸（Windows\\Web\\Wallpaper） */
@@ -309,16 +311,18 @@ export function WallpaperPicker({ value, onChange }: WallpaperPickerProps): Reac
                 <span className="text-[12px] text-foreground/45">扫到 {workshop.length} 个壁纸；场景型个别可能不兼容</span>
                 <button type="button" className="text-[12px] text-foreground/45 hover:text-foreground" onClick={() => setWorkshop(null)}>收起</button>
               </div>
-              <div className="max-h-52 overflow-y-auto">
+              {/* 缩略图网格：以前每行只有一个 Film 图标，几十张壁纸长得一模一样，没法挑 */}
+              <div className="grid max-h-72 grid-cols-3 gap-1.5 overflow-y-auto pr-0.5">
                 {workshop.map((item) => {
                   const selected = item.kind === 'scene' ? config.scene === item.id : config.videoFile === item.path
                   return (
                     <button
                       key={item.id}
                       type="button"
+                      title={item.title}
                       className={cn(
-                        'flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-[12.5px] transition-colors',
-                        selected ? 'bg-primary/10 text-foreground' : 'text-foreground/70 hover:bg-foreground/[0.05] hover:text-foreground',
+                        'group relative aspect-video overflow-hidden rounded-md border bg-muted/40 transition-colors',
+                        selected ? 'border-primary ring-1 ring-primary' : 'border-border/60 hover:border-foreground/30',
                       )}
                       onClick={() => {
                         if (item.kind === 'scene') patch({ scene: item.id, videoFile: undefined, dynamic: undefined })
@@ -326,12 +330,33 @@ export function WallpaperPicker({ value, onChange }: WallpaperPickerProps): Reac
                         toast(`已选择「${item.title}」，正在加载`)
                       }}
                     >
-                      <Film className="size-3.5 shrink-0" />
-                      <span className="truncate">{item.title}</span>
-                      {selected && <Check className="size-3.5 shrink-0 text-primary" />}
-                      <span className="ml-auto shrink-0 rounded bg-primary/15 px-1.5 py-px text-[10.5px] text-primary">
+                      {item.preview ? (
+                        <img
+                          src={item.preview}
+                          alt=""
+                          className="h-full w-full object-cover"
+                          loading="lazy"
+                          draggable={false}
+                        />
+                      ) : (
+                        // 没有封面时退化成图标 + 标题，至少还能分辨
+                        <span className="flex h-full w-full flex-col items-center justify-center gap-1 px-1 text-foreground/45">
+                          <Film className="size-4" />
+                          <span className="line-clamp-2 text-center text-[10px] leading-tight">{item.title}</span>
+                        </span>
+                      )}
+                      {/* 底部渐变压字：封面本身通常没有文字，标题必须能读 */}
+                      <span className="pointer-events-none absolute inset-x-0 bottom-0 truncate bg-gradient-to-t from-black/75 to-transparent px-1.5 pb-1 pt-3 text-left text-[10.5px] text-white">
+                        {item.title}
+                      </span>
+                      <span className="absolute left-1 top-1 rounded bg-black/55 px-1 py-px text-[9.5px] text-white/90">
                         {item.kind === 'video' ? '视频' : '场景'}
                       </span>
+                      {selected && (
+                        <span className="absolute right-1 top-1 rounded-full bg-primary p-0.5 text-primary-foreground">
+                          <Check className="size-2.5" />
+                        </span>
+                      )}
                     </button>
                   )
                 })}

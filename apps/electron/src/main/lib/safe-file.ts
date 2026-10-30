@@ -73,6 +73,20 @@ export function writeTextFileAtomic(filePath: string, content: string): void {
 }
 
 /**
+ * 去掉 UTF-8 BOM 再解析 JSON。
+ *
+ * Windows 上用户用记事本、或某些编辑器「另存为 UTF-8」时会在文件头写入
+ * U+FEFF。`JSON.parse` 不认它，直接抛 "Unexpected token '﻿'"。
+ * 对这些配置文件来说，BOM 只是编码标记，不该让整份配置作废。
+ *
+ * 用 `charCodeAt` 判断而不是正则，避免 `\uFEFF` 在源码里被编辑器吃掉。
+ */
+export function parseJsonText<T>(text: string): T {
+  const stripped = text.charCodeAt(0) === 0xfeff ? text.slice(1) : text
+  return JSON.parse(stripped) as T
+}
+
+/**
  * 安全读取 JSON 索引文件
  * 优先读主文件，损坏则尝试 .tmp / .bak，都失败返回 null
  */
@@ -85,7 +99,7 @@ export function readJsonFileSafe<T>(filePath: string): T | null {
     try {
       const raw = readFileSync(filePath, 'utf-8')
       if (raw.trim().length > 0) {
-        return JSON.parse(raw) as T
+        return parseJsonText<T>(raw)
       }
     } catch {
       console.warn(`[数据恢复] 主索引文件损坏: ${filePath}`)
@@ -97,7 +111,7 @@ export function readJsonFileSafe<T>(filePath: string): T | null {
     try {
       const raw = readFileSync(tmpPath, 'utf-8')
       if (raw.trim().length > 0) {
-        const parsed = JSON.parse(raw) as T
+        const parsed = parseJsonText<T>(raw)
         // .tmp 有效 → 提升为主文件
         renameSync(tmpPath, filePath)
         console.log(`[数据恢复] 从 .tmp 文件恢复: ${filePath}`)
@@ -115,7 +129,7 @@ export function readJsonFileSafe<T>(filePath: string): T | null {
     try {
       const raw = readFileSync(bakPath, 'utf-8')
       if (raw.trim().length > 0) {
-        const parsed = JSON.parse(raw) as T
+        const parsed = parseJsonText<T>(raw)
         // 用 .bak 恢复主文件（跳过备份，避免用损坏的主文件覆盖好的 .bak）
         writeJsonFileAtomic(filePath, parsed as object, true)
         console.log(`[数据恢复] 从 .bak 文件恢复: ${filePath}`)

@@ -55,6 +55,14 @@ export interface ContextCompactionState {
   afterCompletedTurn?: boolean
   summary?: string
   message?: string
+  reason?: 'manual' | 'threshold' | 'overflow' | 'idle'
+  contextWindow?: number
+  thresholdTokens?: number
+  strategy?: 'cache-preserving' | 'balanced' | 'aggressive'
+  tokensBefore?: number
+  tokensAfter?: number
+  tokensReclaimed?: number
+  fixedOverheadTokens?: number
 }
 
 /** 用户可见的 retry 生命周期。 */
@@ -105,6 +113,10 @@ export interface AgentStreamState {
   costUsd?: number
   /** 模型上下文窗口大小 */
   contextWindow?: number
+  /** 是否为内置/目录确认窗口；手填值不应跳过压缩安全上限。 */
+  contextWindowTrusted?: boolean
+  /** 后端按当前窗口可信度与用户阈值计算出的实际压缩点。 */
+  compactionThresholdTokens?: number
   /** 当前上下文 token 是 Pi 手动压缩后的预估值 */
   contextUsageIsEstimated?: boolean
   /** 当前 thinking block 的 token 估算值（SDK 实时估算，非计费值） */
@@ -363,6 +375,8 @@ export type AgentViewStreamState = Pick<
   | 'cacheReadTokens'
   | 'cacheCreationTokens'
   | 'contextWindow'
+  | 'contextWindowTrusted'
+  | 'compactionThresholdTokens'
   | 'contextUsageIsEstimated'
   | 'isCompacting'
 >
@@ -380,6 +394,8 @@ export function areAgentViewStreamStatesEqual(
     && previous.cacheReadTokens === next.cacheReadTokens
     && previous.cacheCreationTokens === next.cacheCreationTokens
     && previous.contextWindow === next.contextWindow
+    && previous.contextWindowTrusted === next.contextWindowTrusted
+    && previous.compactionThresholdTokens === next.compactionThresholdTokens
     && previous.contextUsageIsEstimated === next.contextUsageIsEstimated
     && previous.isCompacting === next.isCompacting
 }
@@ -1351,6 +1367,12 @@ export function applyAgentEvent(
         ...(event.usage.contextWindow && {
           contextWindow: Math.max(resumed.contextWindow ?? 0, event.usage.contextWindow),
         }),
+        ...(event.usage.contextWindowTrusted != null && {
+          contextWindowTrusted: event.usage.contextWindowTrusted,
+        }),
+        ...(event.usage.compactionThresholdTokens != null && {
+          compactionThresholdTokens: event.usage.compactionThresholdTokens,
+        }),
       }
     }
 
@@ -1362,6 +1384,10 @@ export function applyAgentEvent(
         contextCompaction: {
           status: 'running',
           afterCompletedTurn: event.afterCompletedTurn === true,
+          reason: event.reason,
+          contextWindow: event.contextWindow,
+          thresholdTokens: event.thresholdTokens,
+          strategy: event.strategy,
         },
       }
 
@@ -1370,6 +1396,14 @@ export function applyAgentEvent(
         status: event.status,
         summary: event.summary,
         message: event.message,
+        reason: event.reason,
+        contextWindow: event.contextWindow,
+        thresholdTokens: event.thresholdTokens,
+        strategy: event.strategy,
+        tokensBefore: event.tokensBefore,
+        tokensAfter: event.tokensAfter,
+        tokensReclaimed: event.tokensReclaimed,
+        fixedOverheadTokens: event.fixedOverheadTokens,
       }
       if (event.estimatedTokensAfter == null) {
         return { ...prev, isCompacting: false, contextCompaction }

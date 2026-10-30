@@ -138,10 +138,10 @@ describe('模型流卡住看门狗', () => {
   })
 
   test('环境变量可以调整或关闭空闲阈值', () => {
-    expect(resolveStreamStallSettings({})).toMatchObject({firstEventMs:180_000,idleMs:120_000,requestMs:0})
+    expect(resolveStreamStallSettings({})).toMatchObject({firstEventMs:240_000,idleMs:180_000,requestMs:0})
     expect(resolveStreamStallSettings({ ROY_STREAM_STALL_SECONDS: '0' }).idleMs).toBe(0)
-    expect(resolveStreamStallSettings({ ROY_STREAM_STALL_SECONDS: '200' })).toMatchObject({ idleMs: 200_000, firstEventMs: 200_000 })
-    expect(resolveStreamStallSettings({ ROY_STREAM_STALL_SECONDS: 'abc' }).idleMs).toBe(120_000)
+    expect(resolveStreamStallSettings({ ROY_STREAM_STALL_SECONDS: '200' })).toMatchObject({ idleMs: 200_000, firstEventMs: 240_000 })
+    expect(resolveStreamStallSettings({ ROY_STREAM_STALL_SECONDS: 'abc' }).idleMs).toBe(180_000)
     const original = () => fakeStream([], undefined)
     expect(withStreamStallWatchdog(original, { firstEventMs: 1, idleMs: 0, graceMs: 1 })).toBe(original)
   })

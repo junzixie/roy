@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Pi 模型注册与渠道兼容层。
  *
  * Pi SDK 需要把 Roy 渠道临时注册成 runtime provider；这里集中处理
@@ -50,6 +50,8 @@ export interface PiModelDefaults {
   input: PiCatalogModel['input']
   cost: PiModelCost
   contextWindow: number
+  /** Only catalog/model-rule values are trusted; a channel's hand-entered value remains capped. */
+  contextWindowTrusted: boolean
   maxTokens: number
 }
 
@@ -63,6 +65,77 @@ const CODEX_BASE_URL = 'https://chatgpt.com/backend-api'
 const CODEX_MAX_TOKENS = 128_000
 // GPT-6 Astra 与 GPT-5.6 系列统一按 372K 上下文注册。
 const CODEX_GPT_6_ASTRA_CONTEXT_WINDOW = CODEX_GPT_56_CONTEXT_WINDOW
+
+/** Channel-only fills stay untrusted; verified Codex/catalog/inferred windows may bypass the absolute cap. */
+export function isTrustedPiContextWindow(options: {
+  channelContextWindow?: number
+  catalogContextWindow?: number
+  inferredContextWindow?: number
+  codexAlignedContextWindow?: number
+}): boolean {
+  // 有 Codex/目录/推断出的已验证窗口时，即使渠道也填了窗口，仍可信任验证值。
+  // 渠道手填单独存在（无验证来源）时才走不信任 + 绝对上限，防止 1M 虚标把压缩拖到极晚。
+  if ([options.catalogContextWindow, options.codexAlignedContextWindow]
+    .some((window) => typeof window === 'number' && Number.isFinite(window) && window > 0)) {
+    return true
+  }
+  if (typeof options.inferredContextWindow === 'number'
+    && Number.isFinite(options.inferredContextWindow)
+    && options.inferredContextWindow > DEFAULT_CONTEXT_WINDOW) {
+    return true
+  }
+  if (typeof options.channelContextWindow === 'number' && options.channelContextWindow > 0) return false
+  return false
+}
+
+/**
+ * 解析实际用于 Pi 注册与压缩阈值的上下文窗口。
+ *
+ * 渠道里手填的 1M 经常虚标；若模型已有 Codex/目录/推断确认值，则：
+ * - 窗口取 min(渠道, 验证值)，避免虚标抬高注册窗口；
+ * - 标记 trusted，跳过 20 万绝对硬顶，让压缩点按真实能力（如 gpt-6.1-sol 的 372K）计算。
+ */
+export function resolvePiEffectiveContextWindow(options: {
+  channelContextWindow?: number
+  catalogContextWindow?: number
+  inferredContextWindow?: number
+  codexAlignedContextWindow?: number
+}): { contextWindow: number; trusted: boolean } {
+  const channel = typeof options.channelContextWindow === 'number' && options.channelContextWindow > 0
+    ? options.channelContextWindow
+    : undefined
+  const catalog = typeof options.catalogContextWindow === 'number' && options.catalogContextWindow > 0
+    ? options.catalogContextWindow
+    : undefined
+  const codex = typeof options.codexAlignedContextWindow === 'number' && options.codexAlignedContextWindow > 0
+    ? options.codexAlignedContextWindow
+    : undefined
+  const inferred = typeof options.inferredContextWindow === 'number' && Number.isFinite(options.inferredContextWindow) && options.inferredContextWindow > 0
+    ? options.inferredContextWindow
+    : undefined
+
+  const verified = codex
+    ?? (catalog && catalog > DEFAULT_CONTEXT_WINDOW ? catalog : undefined)
+    ?? (inferred && inferred > DEFAULT_CONTEXT_WINDOW ? inferred : undefined)
+
+  if (verified) {
+    return {
+      contextWindow: channel ? Math.min(channel, verified) : verified,
+      trusted: true,
+    }
+  }
+
+  const contextWindow = channel ?? catalog ?? inferred ?? DEFAULT_CONTEXT_WINDOW
+  return {
+    contextWindow,
+    trusted: isTrustedPiContextWindow({
+      channelContextWindow: channel,
+      catalogContextWindow: catalog,
+      inferredContextWindow: inferred,
+      codexAlignedContextWindow: codex,
+    }),
+  }
+}
 /**
  * 将 Codex 已标记的 GPT-5.x 上下文窗口外推到同名第三方模型。
  *
@@ -718,6 +791,13 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions): Promise<PiMod
     && (glmModelId === 'glm-5.3' || glmModelId === 'glm-5.3-flash')
   const catalogContextWindow = catalogModel?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
   const inferredContextWindow = inferContextWindow(input.model) ?? DEFAULT_CONTEXT_WINDOW
+  const effectiveContext = resolvePiEffectiveContextWindow({
+    channelContextWindow: input.channelContextWindow,
+    catalogContextWindow: catalogModel?.contextWindow,
+    inferredContextWindow,
+    codexAlignedContextWindow: codexAlignedCapabilities?.contextWindow,
+  })
+  const contextWindowTrusted = effectiveContext.trusted
   const shouldForceAdaptiveThinking = shouldForcePiAdaptiveThinking(api, catalogModel, input.model)
   return {
     api,
@@ -735,11 +815,9 @@ async function resolvePiModelDefaults(input: PiAgentQueryOptions): Promise<PiMod
         ? ['text']
         : catalogModel ? [...catalogModel.input] : ['text', 'image'],
     cost: catalogModel ? { ...catalogModel.cost } : { ...ZERO_MODEL_COST },
-    // Codex 对齐策略优先；其他模型仍保留 catalog 与 shared inference 中更大的已验证能力。
-    // 模型配置里手动填的窗口优先（Arthur 的「1M / 窗口大小」），否则 Codex 对齐策略，再否则 catalog 与推断取大
-    contextWindow: (input.channelContextWindow && input.channelContextWindow > 0 ? input.channelContextWindow : undefined)
-      ?? codexAlignedCapabilities?.contextWindow
-      ?? Math.max(catalogContextWindow, inferredContextWindow),
+    // 有已验证窗口时优先用验证值（渠道 1M 虚标不再抬高注册窗口）；渠道填得更小则尊重保守值。
+    contextWindow: effectiveContext.contextWindow,
+    contextWindowTrusted,
     // Pi catalog 缺少时，GLM-5.3 系列仍按官方 128K 输出上限注册。
     maxTokens: isVolcengineGlm5x
       ? VOLCENGINE_GLM_MAX_TOKENS
@@ -890,7 +968,7 @@ export async function buildCodexModel(sdk: PiSdk, input: CodexModelInput) {
     }
     throw new Error('未找到可用的 ChatGPT (Codex) 模型，请确认已登录并升级 Pi 运行时')
   }
-  return { modelRuntime, model }
+  return { modelRuntime, model, contextWindowTrusted: true }
 }
 
 /** 列出 Pi SDK 内置的 ChatGPT (Codex) 模型 ID，供渲染层"模型拉取"使用。 */
@@ -929,7 +1007,7 @@ export async function buildXaiModel(sdk: PiSdk, input: XaiModelInput) {
   if (!model) {
     throw new Error('未找到可用的 xAI（Grok）模型，请确认订阅已授权并升级 Pi 运行时')
   }
-  return { modelRuntime, model }
+  return { modelRuntime, model, contextWindowTrusted: true }
 }
 
 /** 列出 Pi SDK 内置的 xAI（Grok）模型 ID，供订阅登录后拉取模型使用。 */
@@ -966,7 +1044,7 @@ export async function buildGithubCopilotModel(sdk: PiSdk, input: GithubCopilotMo
     if (resolvedModelId) throw new Error(`GitHub Copilot 当前订阅不支持模型: ${resolvedModelId}`)
     throw new Error('未找到可用的 GitHub Copilot 模型，请确认订阅已授权且至少启用一个模型')
   }
-  return { modelRuntime, model }
+  return { modelRuntime, model, contextWindowTrusted: true }
 }
 
 /** 列出当前 GitHub Copilot 凭据实际允许使用的模型。 */
@@ -1027,5 +1105,5 @@ export async function buildModel(sdk: PiSdk, input: PiAgentQueryOptions) {
   })
   const model = modelRuntime.getModel(providerName, resolvedModelId ?? 'default')
   if (!model) throw new Error(`Pi model registration failed: ${resolvedModelId ?? 'default'}`)
-  return { modelRuntime, model }
+  return { modelRuntime, model, contextWindowTrusted: modelDefaults.contextWindowTrusted }
 }

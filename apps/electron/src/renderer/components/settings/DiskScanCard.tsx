@@ -21,6 +21,7 @@ import {
 } from './primitives'
 import { Button } from '../ui/button'
 import { cn } from '@/lib/utils'
+import { formatBytes as __sharedFormatBytes } from '@roy/shared'
 
 type ScanRisk = 'safe' | 'caution' | 'danger'
 
@@ -53,14 +54,6 @@ interface ScanResult {
   scannedAt: number
   errors: string[]
   durationMs: number
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes <= 0) return '0 B'
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
-  return `${(bytes / 1024 / 1024 / 1024).toFixed(2)} GB`
 }
 
 const RISK_META: Record<ScanRisk, { label: string; className: string; Icon: typeof ShieldCheck }> = {
@@ -107,7 +100,7 @@ function ScanItemRow({ item }: { item: ScanItem }): React.ReactElement {
         <RiskBadge risk={item.risk} />
         {!isDrive && (
           <span className="w-16 shrink-0 text-right text-[12px] text-foreground/60 tabular-nums">
-            {formatBytes(item.bytes)}
+            {__sharedFormatBytes(item.bytes)}
           </span>
         )}
       </div>
@@ -143,7 +136,7 @@ function GroupBlock({ group }: { group: ScanGroup }): React.ReactElement {
         <span className="text-[12.5px] font-medium text-foreground/75">{group.label}</span>
         <span className="min-w-0 flex-1 truncate text-[11.5px] text-foreground/35">{group.description}</span>
         {!isDrive && (
-          <span className="shrink-0 text-[12px] text-foreground/55 tabular-nums">{formatBytes(group.bytes)}</span>
+          <span className="shrink-0 text-[12px] text-foreground/55 tabular-nums">{__sharedFormatBytes(group.bytes)}</span>
         )}
       </button>
       {open && (
@@ -224,7 +217,7 @@ export function DiskScanCard(): React.ReactElement {
         <>
           <div className="mb-3 flex flex-wrap items-baseline gap-x-4 gap-y-1 rounded-lg border border-border/50 bg-muted/25 px-3.5 py-2.5">
             <span className="text-[13px] text-foreground/80">
-              可清理约 <b className="tabular-nums">{formatBytes(result.totalBytes)}</b>
+              可清理约 <b className="tabular-nums">{__sharedFormatBytes(result.totalBytes)}</b>
             </span>
             <span className="text-[12px] text-muted-foreground tabular-nums">
               共 {result.totalFileCount.toLocaleString()} 个文件

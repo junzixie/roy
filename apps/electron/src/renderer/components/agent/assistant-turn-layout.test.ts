@@ -83,4 +83,16 @@ describe('回合分层：执行过程折叠，最终答复独立', () => {
     const blocks = [text('我先看看'), tool('read')]
     expect(collectFinalAnswerText(buildAssistantTurnRenderItems(blocks), blocks)).toBe('我先看看')
   })
+
+
+  test('相邻两段相同正文只留一段；整段翻倍收成一半', () => {
+    const cleaned = cleanAssistantBlocks([text('同一答复'), text('同一答复')])
+    expect(cleaned).toHaveLength(1)
+    expect((cleaned[0]!.block as { text: string }).text).toBe('同一答复')
+
+    const doubled = '完整一段话完整一段话'
+    const one = cleanAssistantBlocks([text(doubled)])
+    expect(one).toHaveLength(1)
+    expect((one[0]!.block as { text: string }).text.trim()).toBe('完整一段话')
+  })
 })

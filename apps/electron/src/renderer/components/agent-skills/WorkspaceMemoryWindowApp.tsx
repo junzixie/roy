@@ -2,6 +2,7 @@ import * as React from 'react'
 import { toast } from 'sonner'
 import { Code2, Eye, FilePlus2, FileText, Loader2, RefreshCw, Save } from 'lucide-react'
 import type { SkillFileNode } from '@roy/shared'
+import { formatBytes as __sharedFormatBytes } from '@roy/shared'
 import { Button } from '@/components/ui/button'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { TooltipProvider } from '@/components/ui/tooltip'
@@ -13,12 +14,6 @@ import { cn } from '@/lib/utils'
 
 function flattenFiles(nodes: SkillFileNode[]): SkillFileNode[] {
   return nodes.flatMap((node) => node.type === 'directory' ? flattenFiles(node.children ?? []) : [node])
-}
-
-function formatBytes(bytes?: number): string {
-  if (bytes == null) return ''
-  if (bytes < 1024) return `${bytes} B`
-  return `${(bytes / 1024).toFixed(1)} KB`
 }
 
 /** Standalone, editable view of one workspace's managed memory/ root. */
@@ -239,7 +234,7 @@ export function WorkspaceMemoryWindowApp(): React.ReactElement {
                 <button key={file.relativePath} type="button" onClick={() => requestOpenFile(file.relativePath)} className={cn('flex w-full items-center gap-2 rounded-md px-2 py-2 text-left text-xs transition-colors [-webkit-app-region:no-drag]', selectedPath === file.relativePath ? 'bg-accent text-accent-foreground' : 'text-foreground/80 hover:bg-accent/60')}>
                   <FileText size={14} className="shrink-0 text-muted-foreground" />
                   <span className="min-w-0 flex-1 truncate">{file.relativePath}</span>
-                  <span className="shrink-0 text-[10px] text-muted-foreground">{formatBytes(file.size)}</span>
+                  <span className="shrink-0 text-[10px] text-muted-foreground">{__sharedFormatBytes(file.size)}</span>
                 </button>
               ))}
             </div>

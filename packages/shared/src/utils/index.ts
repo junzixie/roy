@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Shared utility functions for roy
  */
 
@@ -39,16 +39,43 @@ export {
   PI_AUTO_COMPACTION_MIN_PERCENT,
   PI_AUTO_COMPACTION_MAX_PERCENT,
   PI_AUTO_COMPACTION_ABSOLUTE_MAX_TOKENS,
+  PI_IDLE_PRECOMPACT_WATERMARK_RATIO,
+  PI_IDLE_PRECOMPACT_DELAY_MS,
+  PI_IDLE_PRECOMPACT_NEAR_FULL_DELAY_MS,
   PI_COMPACTION_KEEP_RECENT_TOKENS,
   PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
+  PI_COMPACTION_STRATEGY_RATIOS,
   normalizeCompactionPercent,
+  getPiCompactionStrategyRatio,
   calculatePiAutoCompactionReserveTokens,
   calculatePiAutoCompactionThresholdTokens,
+  calculatePiIdlePrecompactWatermarkTokens,
+  shouldScheduleIdlePrecompact,
+  resolveIdlePrecompactDelayMs,
   calculatePiCompactionKeepRecentTokens,
   isCompactionResidualTooHigh,
   describeCompactionResidual,
+  PI_SHORT_TOOL_OUTPUT_CHARS,
+  PI_SHORT_TOOL_OUTPUT_HEAD_CHARS,
+  PI_SHORT_TOOL_OUTPUT_TAIL_CHARS,
+  truncateToolResultText,
+  truncateToolResultContent,
+  pruneOversizedToolResultsInMessages,
+  pruneToolResultsTiered,
+  estimatePiMessagesChars,
+  PI_TIERED_PRUNE_RECENT_KEEP,
+  PI_TIERED_PRUNE_MID_CHARS,
+  PI_TIERED_PRUNE_OLD_CHARS,
 } from './pi-compaction'
-export type { CompactionResidualBreakdown } from './pi-compaction'
+export type { CompactionResidualBreakdown, PiCompactionCacheStrategy, PiCompactionThresholdOptions } from './pi-compaction'
+export {
+  ROY_CACHE_MODE_TO_RETENTION,
+  ROY_DEFAULT_CACHE_MODE,
+  cacheKeyForSession,
+  normalizeCacheMode,
+  resolveCacheRetention,
+} from './prompt-cache-policy'
+export type { CacheRetentionValue, RoyCacheMode } from './prompt-cache-policy'
 export {
   inferMcpTransportType,
   normalizeMcpTransportType,
@@ -118,3 +145,5 @@ export {
   verifySkillPackageMeta,
 } from './skill-integrity'
 export type { SkillPackageMeta, SkillIntegrityResult } from './skill-integrity'
+
+export { formatBytes, formatDuration } from './format'

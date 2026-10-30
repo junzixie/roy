@@ -60,7 +60,10 @@
         to { opacity: 1; transform: translateY(0); filter: blur(0); }
       }
 
-      /* 进度线：一条暗轨道，上面一段青绿从 0 走到 86% 停住（照 Arthur） */
+      /* 进度线：一条暗轨道，上面的青绿段由**真实启动进度**驱动。
+         .fill 的初始动画只是一段「蠕动」兜底：万一没收到任何进度事件（例如
+         preload 没加载），它也会缓慢爬到 26% 停住，看起来在动而不是死钉在 0；
+         真实进度一到就用内联 width 覆盖它（见下面的 applyProgress）。 */
       .track {
         margin-top: 20px; display: block; height: 1px; width: 168px;
         background: rgba(160, 220, 210, .14); overflow: hidden; border-radius: 999px;
@@ -69,12 +72,11 @@
         display: block; height: 100%; width: 0; border-radius: 999px;
         background: linear-gradient(90deg, rgba(86,246,205,.25), rgba(86,246,205,.95));
         box-shadow: 0 0 8px rgba(86, 246, 205, .55);
-        animation: progress 2.2s cubic-bezier(.3, 0, .2, 1) .15s forwards;
+        animation: creep 3.2s cubic-bezier(.3, 0, .2, 1) forwards;
       }
-      @keyframes progress {
+      @keyframes creep {
         0% { width: 0; }
-        55% { width: 52%; }
-        100% { width: 86%; }
+        100% { width: 26%; }
       }
 
       /* 步骤文案：淡入、停留、淡出 */
@@ -91,7 +93,7 @@
 
       @media (prefers-reduced-motion: reduce) {
         .letter, .step span, .word { animation-duration: .01s; }
-        .fill { animation: none; width: 86%; }
+        .fill { animation: none; width: 26%; }
       }
     </style>
   </head>
@@ -101,12 +103,12 @@
     <main class="stage" aria-busy="true" aria-live="polite">
       <canvas id="orbCanvas" hidden aria-hidden="true"></canvas>
       <div class="word" id="word"></div>
-      <span class="track"><span class="fill"></span></span>
+      <span class="track" id="track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0" aria-label="启动进度"><span class="fill"></span></span>
       <div class="step" id="step"></div>
     </main>
 
     <script>
-      // ===== 字标与步骤文案 =====
+      // ===== 字标 =====
       const WORD = 'Roy'.split('')
       const word = document.getElementById('word')
       WORD.forEach((ch, i) => {
@@ -117,27 +119,70 @@
         word.appendChild(el)
       })
 
-      const STEPS = ['正在读取配置', '正在连接模型', '正在启动 MCP 服务器', '正在扫描技能', '正在准备你的工作目录']
+      // ===== 进度与步骤文案：由主进程推送真实状态 =====
+      // 这里**不再**轮播写死的文案、也不再跑一条固定时长的假进度条。主进程在
+      // safeRun / safeAwait 里上报每一步真实启动阶段（见 main/index.ts 的
+      // reportBootProgress），preload 把它转成 { label, percent } 事件。
       const stepEl = document.getElementById('step')
-      let si = 0
-      const renderStep = () => {
-        stepEl.innerHTML = ''
-        const s = document.createElement('span')
-        s.textContent = STEPS[si]
-        stepEl.appendChild(s)
-      }
-      renderStep()
+      const fillEl = document.querySelector('.fill')
+      const trackEl = document.getElementById('track')
       let splashStopped = false
       let orbFrame = 0
-      const stepTimer = setInterval(() => { if (!document.hidden && !splashStopped) { si = (si + 1) % STEPS.length; renderStep() } }, 1600)
+
+      /** 把一条真实进度画到界面上。 */
+      const applyProgress = ({ label, percent }) => {
+        if (splashStopped) return
+        // 首次收到真实进度就接管进度条：关掉兜底的 creep 动画，改内联宽度。
+        if (fillEl.style.animation !== 'none') {
+          fillEl.style.animation = 'none'
+          fillEl.style.transition = 'width .45s cubic-bezier(.3, 0, .2, 1)'
+        }
+        fillEl.style.width = Math.max(percent, 3) + '%'
+        trackEl.setAttribute('aria-valuenow', String(percent))
+        // 文案只在真的变了才重播动画，避免同一句话被反复重建而闪烁。
+        if (stepEl.dataset.label === label) return
+        stepEl.dataset.label = label
+        stepEl.innerHTML = ''
+        const s = document.createElement('span')
+        s.textContent = label
+        stepEl.appendChild(s)
+      }
+
+      // 兜底文案：先铺上，再订阅。反过来的话，若某条进度在订阅后、兜底前抵达，
+      // 兜底会把刚写好的真实文案覆盖掉。
+      stepEl.innerHTML = ''
+      const initial = document.createElement('span')
+      initial.textContent = '正在启动'
+      stepEl.appendChild(initial)
+
+      const splashApi = window.roySplash
+      if (splashApi && typeof splashApi.onProgress === 'function') {
+        splashApi.onProgress(applyProgress)
+      }
+
+      // 15 秒没有任何推进就明说「慢」，而不是让用户对着静止画面猜。
+      const slowTimer = setTimeout(() => {
+        if (splashStopped) return
+        stepEl.innerHTML = ''
+        const s = document.createElement('span')
+        s.textContent = '启动比平时慢，仍在继续…'
+        stepEl.appendChild(s)
+      }, 15000)
+
       window.stopRoySplash = () => {
         splashStopped = true
-        clearInterval(stepTimer)
+        clearTimeout(slowTimer)
         cancelAnimationFrame(orbFrame)
         document.querySelectorAll('video').forEach(video => video.pause())
         document.getAnimations().forEach(animation => animation.pause())
       }
       window.addEventListener('pagehide', window.stopRoySplash, { once: true })
+      // 点击跳过：用户不想等就立刻收起，不用等最短展示时长。
+      document.addEventListener('click', () => {
+        if (splashStopped) return
+        if (splashApi && typeof splashApi.skip === 'function') splashApi.skip()
+        else window.stopRoySplash()
+      }, { once: true })
 
       // ===== 粒子球：照 Arthur 的 JarvisHud =====
       // 球面上几千个点绕轴自转，远处更暗更小、近处更亮更大；外圈一层稀疏星尘反向慢转。

@@ -32,7 +32,8 @@ export function getChatToolsConfig(): ChatToolsFileConfig {
 
   try {
     const raw = readFileSync(filePath, 'utf-8')
-    const data = JSON.parse(raw) as Partial<ChatToolsFileConfig>
+    // 去 BOM：用户手改过的工具配置可能带 U+FEFF
+    const data = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw) as Partial<ChatToolsFileConfig>
     return {
       toolStates: { ...DEFAULT_CONFIG.toolStates, ...data.toolStates },
       toolCredentials: data.toolCredentials ?? {},

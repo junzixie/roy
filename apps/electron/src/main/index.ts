@@ -369,6 +369,60 @@ const STARTUP_SPLASH_FADE_OUT_MS = 320
  * 2000ms 能让视频动画走完开头段落，字标和进度线也有时间读。
  */
 const STARTUP_SPLASH_MIN_ON_SCREEN_MS = 2000
+/**
+ * 启动页硬超时：渲染层到这个点还没发 `app:renderer-ready`，就让出屏幕。
+ *
+ * 没有这条兜底时，渲染进程一旦卡死或崩溃在「还没发 ready」的阶段，启动页会
+ * 永久停在屏幕上，并且盖住下面的错误信息——用户看到的是一段播不完的动画，
+ * 而不是「启动失败了」。正常启动远快于此值，所以只在异常路径上触发。
+ */
+const STARTUP_SPLASH_HARD_TIMEOUT_MS = 30_000
+
+/**
+ * 启动步骤代号 → 启动页文案。
+ *
+ * 键必须与 `safeRun(...)` / `safeAwait(...)` 的第一个参数逐字一致：这两个函数
+ * 是所有启动钩子的唯一入口，改一行就能覆盖全部调用点，所以这份表是「用户看到的
+ * 启动阶段」的单一真源。不在表里的代号不推进进度（例如纯内部的 watcher 注册），
+ * 顺序即真实执行顺序，进度条因此是单调的。
+ */
+const BOOT_STEP_LABELS: Record<string, string> = {
+  initializeRuntime: '正在初始化运行环境',
+  seedDefaultSkills: '正在准备技能',
+  upgradeDefaultSkillsInWorkspaces: '正在升级技能',
+  markRunningDelegationsAsInterrupted: '正在收敛上次的会话',
+  cliBridge: '正在启动命令行',
+  mobileRemote: '正在启动远程控制',
+  startWorkspaceWatcher: '正在监听工作目录',
+  startAllBridges: '正在连接消息渠道',
+  startScheduler: '正在启动定时任务',
+  startPlanningReminderScheduler: '正在准备提醒',
+}
+/** 进度分母：只数真正会上报的步骤，避免分母含未列出的代号导致永远到不了 100%。 */
+const BOOT_STEP_TOTAL = Object.keys(BOOT_STEP_LABELS).length
+/** 已经走完的步骤数。启动只发生一次，所以用模块级计数而不是传参。 */
+let bootStepDone = 0
+
+/**
+ * 把一步启动推进同步给启动页。
+ *
+ * 启动页可能还没加载完（`webContents` 已建但页面未 ready），此时 `send` 会丢；
+ * 这是可接受的——启动页拿到的是「此后每一步」，而第一步之前它本来也没有进度可显示。
+ * 页面侧会用 `--dsh-boot-arc` 之外的真实推送驱动进度条，所以丢早期事件只表现为
+ * 起点略高一点，不会卡住。
+ *
+ * @param name - `safeRun` / `safeAwait` 的步骤代号。
+ */
+function reportBootProgress(name: string): void {
+  const label = BOOT_STEP_LABELS[name]
+  if (label === undefined) return
+  bootStepDone = Math.min(BOOT_STEP_TOTAL, bootStepDone + 1)
+  if (!startupSplashWindow || startupSplashWindow.isDestroyed()) return
+  startupSplashWindow.webContents.send('splash:progress', {
+    label,
+    percent: Math.round((bootStepDone / BOOT_STEP_TOTAL) * 100),
+  })
+}
 
 const DEFAULT_MAIN_WINDOW_WIDTH = 1400
 const DEFAULT_MAIN_WINDOW_HEIGHT = 900
@@ -475,6 +529,9 @@ function createStartupSplashWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
+      // 启动页只订阅启动进度，所以给它一个只暴露一个函数的专用 preload，
+      // 而不是主窗口那份挂了上千个 API 的 preload.cjs。
+      preload: join(__dirname, 'preload-splash.cjs'),
     },
   })
 
@@ -490,6 +547,24 @@ function createStartupSplashWindow(): void {
   splash.once('closed', () => {
     if (startupSplashWindow === splash) startupSplashWindow = null
   })
+  // 页面加载完成时补发一次当前进度：早期的 reportBootProgress 会落在
+  // 「webContents 已建、页面还没监听」的窗口里丢掉，补发让启动页立刻对齐真实状态。
+  splash.webContents.once('did-finish-load', () => {
+    if (splash.isDestroyed()) return
+    const done = Math.max(bootStepDone, 1)
+    const lastLabel = BOOT_STEP_LABELS[Object.keys(BOOT_STEP_LABELS)[done - 1] ?? '']
+    splash.webContents.send('splash:progress', {
+      label: lastLabel ?? '正在启动',
+      percent: Math.round((done / BOOT_STEP_TOTAL) * 100),
+    })
+  })
+  // 硬超时兜底：渲染层始终不就绪时让出屏幕，别把诊断信息盖在动画下面。
+  const hardTimeout = setTimeout(() => {
+    if (!startupSplashWindow || startupSplashWindow.isDestroyed()) return
+    console.warn('[启动] 渲染层超时未就绪，强制收起启动页')
+    dismissStartupSplash()
+  }, STARTUP_SPLASH_HARD_TIMEOUT_MS)
+  splash.once('closed', () => { clearTimeout(hardTimeout) })
   // 启动动画由设置决定（startupAnimation）；未设置时启动页自行随机
   const startupAnimation = getSettings().startupAnimation
   splash.loadFile(getStartupSplashPath(), {
@@ -770,6 +845,13 @@ function createWindow(): void {
   ipcMain.handle('app:renderer-ready', () => {
     dismissStartupSplash()
     return true
+  })
+
+  // 用户点击启动页跳过：只接受来自启动页窗口的请求，别让主窗口也能把它收掉。
+  ipcMain.on('splash:skip', (event) => {
+    if (!startupSplashWindow || startupSplashWindow.isDestroyed()) return
+    if (event.sender !== startupSplashWindow.webContents) return
+    dismissStartupSplash()
   })
 
   // 持久化窗口大小和位置（防抖 500ms，避免频繁写入）
@@ -1163,6 +1245,7 @@ async function bootstrap(): Promise<void> {
 
 /** 同步启动钩子隔离：单点失败仅记录日志，不阻断启动链。 */
 function safeRun(name: string, fn: () => void): void {
+  reportBootProgress(name)
   try {
     fn()
   } catch (err) {
@@ -1172,6 +1255,7 @@ function safeRun(name: string, fn: () => void): void {
 
 /** 异步启动钩子隔离：同 safeRun，但适用于返回 Promise 的钩子。 */
 async function safeAwait(name: string, fn: () => Promise<unknown>): Promise<void> {
+  reportBootProgress(name)
   try {
     await fn()
   } catch (err) {

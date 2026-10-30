@@ -187,7 +187,7 @@ function handleQueryStart(request: RuntimeRequest): void {
     onSessionId: (sdkSessionId: string, sessionFile?: string) => sendCallback(active, 'session_id', { sdkSessionId, sessionFile }),
     onPiEntryBindings: (bindings: Record<string, string>) => sendCallback(active, 'pi_entry_bindings', { bindings }),
     onModelResolved: (model: string) => sendCallback(active, 'model_resolved', { model }),
-    onContextWindow: (contextWindow: number) => sendCallback(active, 'context_window', { contextWindow }),
+    onContextWindow: (contextWindow: number, trustedWindow?: boolean, compactionThresholdTokens?: number) => sendCallback(active, 'context_window', { contextWindow, trustedWindow, compactionThresholdTokens }),
     onRetry: (update: unknown) => sendCallback(active, 'retry', { update }),
     onSkillActivated: (activations: unknown, userMessageUuid: string) => sendCallback(active, 'skill_activated', { activations, userMessageUuid }),
     onCodexOAuthCredentialsRefreshed: (credentials: unknown) => requestParent(

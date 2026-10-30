@@ -51,6 +51,14 @@ export interface ReasoningCompactionSettings {
   truncateChars?: number
   /** 只在思考开启时生效；关闭思考时根本没有 reasoning 需要处理。 */
   enabled?: boolean
+  /**
+   * 是否把「已排除路径」锚点补回上下文。
+   *
+   * 默认开启：推理尾截断丢掉的前段里，最值得保留的就是「这条路试过了、不行」这类
+   * 排除结论。不补偿的话模型会重复走回头路，省下的 token 又花回去。
+   * 无锚点时零字节差异，不构成额外成本。
+   */
+  injectAnchors?: boolean
 }
 
 /** 默认保留的推理尾部长度。约 800 tokens，够承接上一轮思路，又不至于把历史撑大。 */

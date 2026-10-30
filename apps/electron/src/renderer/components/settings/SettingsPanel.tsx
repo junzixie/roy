@@ -28,6 +28,7 @@ import {
   RefreshCw,
   MousePointerClick,
   Coins,
+  Sparkles,
 } from "lucide-react";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { ShortcutKeycaps } from "@/components/shortcuts/ShortcutKeycaps";
@@ -68,6 +69,7 @@ const ComputerSettings = React.lazy(() => import("./ComputerSettings").then(m =>
 const AboutSettings = React.lazy(() => import("./AboutSettings").then(m => ({ default: m.AboutSettings })));
 const MemorySettings = React.lazy(() => import("./MemorySettings").then(m => ({ default: m.MemorySettings })));
 const PointsSettings = React.lazy(() => import("./PointsSettings").then(m => ({ default: m.PointsSettings })));
+const PerformanceSettings = React.lazy(() => import("./PerformanceSettings").then(m => ({ default: m.PerformanceSettings })));
 import { useOpenSession } from '@/hooks/useOpenSession'
 
 /** 设置 Tab 定义 */
@@ -89,6 +91,7 @@ const BASE_SETTINGS_GROUP: SettingsGroup = {
   title: "基础设置",
   tabs: [
     { id: "general", label: "通用", icon: <Settings size={16} /> },
+    { id: "experience", label: "使用体验", icon: <Sparkles size={16} /> },
     { id: "channels", label: "模型配置", icon: <Radio size={16} /> },
     { id: "points", label: "Roy 点数", icon: <Coins size={16} /> },
     { id: "appearance", label: "外观", icon: <Palette size={16} /> },
@@ -133,6 +136,8 @@ function renderTabContent(tab: SettingsTab): React.ReactElement {
   switch (tab) {
     case "general":
       return <GeneralSettings />;
+    case "experience":
+      return <PerformanceSettings />;
     case "account":
       // 账号已并入「通用」（旧入口、激活码弹窗等跳转仍落到这里）
       return <GeneralSettings />;

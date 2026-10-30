@@ -56,7 +56,10 @@ function useResolvedSrc(src: string, needsResolve: boolean): { url: string; miss
     return () => { cancelled = true }
   }, [src, needsResolve])
   if (!needsResolve) return { url: src, missing: false }
-  return state.key === src ? { url: state.url, missing: state.missing } : { url: '', missing: false }
+  // 解析还没回来时**沿用上一个地址**，不要返回空串。
+  // 返回空串会让 active 变 false、整层壁纸卸载，露出的就是下面那层不透明底色——
+  // 这是切本地壁纸时闪一下的真正原因（不只是视频那条）。
+  return state.key === src ? { url: state.url, missing: state.missing } : { url: state.url, missing: false }
 }
 
 export function WallpaperLayer(): React.ReactElement | null {
@@ -77,11 +80,80 @@ export function WallpaperLayer(): React.ReactElement | null {
   const { kind, scope, strength, boldText, imageScale, objectPosition, sceneFps, scenePause, fitHeight } = effective
   const resolved = useResolvedSrc(kind === 'scene' || kind === 'procedural' ? '' : effective.src, effective.needsResolve)
   const [mediaReady, setMediaReady] = React.useState(false)
-  const videoRef = React.useRef<HTMLVideoElement | null>(null)
+
+  /**
+   * 视频双槽：A / B 交替。
+   *
+   * 以前是一个 `<video key={mediaUrl}>`，切壁纸时 React 直接销毁重建，新视频
+   * 解码出第一帧之前 `mediaReady` 一直是 false，于是整层变透明、露出下面的不透明
+   * 底色——用户看到的就是「切换时闪一下黑/白」。
+   *
+   * 现在旧视频留在前台继续播，新视频装进背面槽加载，只有它真的解出第一帧
+   * （`loadeddata`）才交换前后台。屏幕上任何时刻都有一张已解码的画面，
+   * 中间那层底色再也不会露出来。
+   */
+  const [videoState, setVideoState] = React.useState<{
+    front: 'a' | 'b'
+    src: Record<'a' | 'b', string>
+    pending: 'a' | 'b' | null
+  }>({ front: 'a', src: { a: '', b: '' }, pending: null })
+  const videoRefs = React.useRef<Record<'a' | 'b', HTMLVideoElement | null>>({ a: null, b: null })
+
+  /** 把新地址装进槽位：前台空就装前台，否则装背面等它就绪。 */
   React.useEffect(() => {
     if (kind !== 'video') return
+    const url = resolved.url
+    if (!url) return
+    setVideoState((prev) => {
+      if (prev.src[prev.front] === url) return prev
+      if (prev.pending !== null && prev.src[prev.pending] === url) return prev
+      if (!prev.src[prev.front]) {
+        return { ...prev, src: { ...prev.src, [prev.front]: url } }
+      }
+      const back = prev.front === 'a' ? 'b' : 'a'
+      return { ...prev, src: { ...prev.src, [back]: url }, pending: back }
+    })
+  }, [kind, resolved.url])
+
+  /** 背面槽解出第一帧：交换前后台。 */
+  const handleSlotReady = React.useCallback((slot: 'a' | 'b'): void => {
+    setVideoState((prev) => {
+      if (prev.front === slot || prev.pending !== slot) return prev
+      return { ...prev, front: slot, pending: null }
+    })
+    setMediaReady(true)
+  }, [])
+
+  /** 交换完成、淡入过渡走完之后，再清掉旧槽的 src，省一份解码器。 */
+  React.useEffect(() => {
+    if (kind !== 'video' || videoState.pending !== null) return
+    const back = videoState.front === 'a' ? 'b' : 'a'
+    if (!videoState.src[back]) return
+    const timer = setTimeout(() => {
+      setVideoState((prev) => {
+        if (prev.pending !== null || prev.front === back) return prev
+        return { ...prev, src: { ...prev.src, [back]: '' } }
+      })
+    }, 400)
+    return () => clearTimeout(timer)
+  }, [kind, videoState])
+
+  /** 离开视频模式时清空槽位。 */
+  React.useEffect(() => {
+    if (kind === 'video') return
+    setVideoState((prev) => (
+      prev.front === 'a' && prev.pending === null && !prev.src.a && !prev.src.b
+        ? prev
+        : { front: 'a', src: { a: '', b: '' }, pending: null }
+    ))
+  }, [kind])
+
+  React.useEffect(() => {
+    if (kind !== 'video') return
+    // 按前台槽取元素，而不是缓存一份 ref：交换前后台之后缓存会指向旧槽，
+    // 暂停/播放就作用在已经隐藏的那个视频上。
     const syncPlayback = (): void => {
-      const video = videoRef.current
+      const video = videoRefs.current[videoState.front]
       if (!video) return
       if (scenePause && (document.hidden || !document.hasFocus())) video.pause()
       else void video.play().catch(() => { /* 切换来源或媒体未就绪时忽略，加载后再同步 */ })
@@ -89,7 +161,7 @@ export function WallpaperLayer(): React.ReactElement | null {
     document.addEventListener('visibilitychange', syncPlayback)
     window.addEventListener('blur', syncPlayback)
     window.addEventListener('focus', syncPlayback)
-    const video = videoRef.current
+    const video = videoRefs.current[videoState.front]
     video?.addEventListener('loadeddata', syncPlayback)
     syncPlayback()
     return () => {
@@ -99,7 +171,7 @@ export function WallpaperLayer(): React.ReactElement | null {
       video?.removeEventListener('loadeddata', syncPlayback)
       video?.pause()
     }
-  }, [kind, resolved.url, scenePause])
+  }, [kind, resolved.url, scenePause, videoState.front])
 
   const mediaUrl = kind === 'image' && effective.needsResolve
     ? (resolved.url ? `url("${resolved.url}")` : '')
@@ -107,6 +179,42 @@ export function WallpaperLayer(): React.ReactElement | null {
       ? effective.src
       : resolved.url
   const active = kind === 'scene' || kind === 'procedural' ? Boolean(effective.src) : kind !== 'none' && Boolean(mediaUrl)
+
+  /**
+   * 图片内容闸门：只有新图**解码完成**才把它换到屏幕上。
+   *
+   * 直接改 `backgroundImage` 时，浏览器在新图解码出来之前什么都不画，露出下面那层
+   * 不透明底色——和视频那条是同一个闪白。这里先离屏加载，成功才提交。
+   * 加载结果同时驱动状态栏（已加载 / 加载失败），所以不再另起一个 effect。
+   */
+  const [committedImage, setCommittedImage] = React.useState('')
+  React.useEffect(() => {
+    if (kind !== 'image' || !mediaUrl) {
+      setCommittedImage('')
+      return
+    }
+    if (committedImage === mediaUrl) return
+    let dead = false
+    const image = new Image()
+    image.onload = () => {
+      if (dead) return
+      setCommittedImage(mediaUrl)
+      setMediaReady(true)
+    }
+    image.onerror = () => {
+      if (dead) return
+      // 清空而不是留着上一张：否则用户以为切换成功了
+      setCommittedImage('')
+      setMediaError('图片加载失败，请重新选择')
+    }
+    image.src = mediaUrl.replace(/^url\(["']?/, '').replace(/["']?\)$/, '')
+    return () => { dead = true; image.onload = null; image.onerror = null }
+    // committedImage 只在比较里用，不需要触发重新加载
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [kind, mediaUrl])
+
+  /** 屏幕上真正该显示的图片地址：加载中就沿用上一张，别露底。 */
+  const shownImage = committedImage || ''
 
   React.useEffect(() => {
     setMediaReady(false)
@@ -119,16 +227,6 @@ export function WallpaperLayer(): React.ReactElement | null {
     else if (mediaReady) setStatus({state:'ready',message:'壁纸已加载'})
     else setStatus({state:'loading',message:'正在加载壁纸…'})
   }, [kind, resolved.missing, mediaReady, mediaError, setStatus])
-
-  React.useEffect(() => {
-    if (kind !== 'image' || !mediaUrl) return
-    let dead = false
-    const image = new Image()
-    image.onload = () => { if (!dead) setMediaReady(true) }
-    image.onerror = () => { if (!dead) setMediaError('图片加载失败，请重新选择') }
-    image.src = mediaUrl.replace(/^url\(["']?/, '').replace(/["']?\)$/, '')
-    return () => { dead = true; image.onload = null; image.onerror = null }
-  }, [kind, mediaUrl])
 
   React.useEffect(() => {
     const root = document.documentElement
@@ -202,7 +300,7 @@ export function WallpaperLayer(): React.ReactElement | null {
             className="absolute"
             style={{
               inset: -80,
-              backgroundImage: mediaUrl,
+              backgroundImage: shownImage,
               backgroundSize: 'cover',
               backgroundPosition: 'center',
               filter: 'blur(48px) saturate(1.05)',
@@ -212,7 +310,7 @@ export function WallpaperLayer(): React.ReactElement | null {
           <div
             className="absolute inset-0"
             style={{
-              backgroundImage: mediaUrl,
+              backgroundImage: shownImage,
               backgroundSize: 'auto 100%',
               backgroundRepeat: 'no-repeat',
               backgroundPosition: objectPosition,
@@ -228,7 +326,7 @@ export function WallpaperLayer(): React.ReactElement | null {
           className="absolute inset-y-0 right-0"
           style={{
             ...area,
-            backgroundImage: mediaUrl,
+            backgroundImage: shownImage,
             backgroundSize: 'cover',
             backgroundPosition: objectPosition,
             transform: [
@@ -239,22 +337,42 @@ export function WallpaperLayer(): React.ReactElement | null {
         />
       )}
 
-      {kind === 'video' && (
-        <video
-          ref={videoRef}
-          key={mediaUrl}
-          className="absolute inset-y-0 right-0 h-full object-cover transition-opacity duration-300"
-          style={{ ...area, width: `calc(100% - ${offset})`, opacity: mediaReady ? 1 : 0 }}
-          src={mediaUrl}
-          loop
-          muted
-          playsInline
-          preload="auto"
-          onLoadedData={() => setMediaReady(true)}
-          onCanPlay={() => setMediaReady(true)}
-          onError={() => { setMediaReady(false); setMediaError('视频无法播放，可能格式不支持或文件损坏') }}
-        />
-      )}
+      {kind === 'video' && (['a', 'b'] as const).map((slot) => {
+        const url = videoState.src[slot]
+        if (!url) return null
+        const isFront = videoState.front === slot
+        return (
+          <video
+            key={slot}
+            ref={(el) => { videoRefs.current[slot] = el }}
+            className="absolute inset-y-0 right-0 h-full object-cover"
+            style={{
+              ...area,
+              width: `calc(100% - ${offset})`,
+              // 前台立刻可见；背面先挂上去解码，交换后靠这条 transition 淡入，
+              // 两帧画面重叠过渡，中间没有透明的一瞬。
+              opacity: isFront ? 1 : 0,
+              transition: 'opacity 300ms ease-out',
+            }}
+            src={url}
+            loop
+            muted
+            playsInline
+            preload="auto"
+            onLoadedData={() => handleSlotReady(slot)}
+            onCanPlay={() => handleSlotReady(slot)}
+            onError={() => {
+              // 背面槽失败：放弃它，继续用前台那张，不打断当前壁纸。
+              if (!isFront) {
+                setVideoState((prev) => (prev.pending === slot ? { ...prev, pending: null, src: { ...prev.src, [slot]: '' } } : prev))
+                return
+              }
+              setMediaReady(false)
+              setMediaError('视频无法播放，可能格式不支持或文件损坏')
+            }}
+          />
+        )
+      })}
 
       {kind === 'scene' && (
         <div className="absolute inset-y-0 right-0" style={{ ...area }}>

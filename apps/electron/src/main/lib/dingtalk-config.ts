@@ -59,7 +59,9 @@ function resolveBotId(clientId: string, fallbackId?: string): string {
 
 function readJsonArrayFile(filePath: string): unknown[] {
   try {
-    const parsed = JSON.parse(readFileSync(filePath, 'utf-8')) as unknown
+    const raw = readFileSync(filePath, 'utf-8')
+    // 去 BOM：用户手改过的配置文件可能带 U+FEFF
+    const parsed = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw) as unknown
     return Array.isArray(parsed) ? parsed : []
   } catch {
     return []

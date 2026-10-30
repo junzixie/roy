@@ -24,8 +24,9 @@ export interface StreamStallSettings {
 }
 
 export const DEFAULT_STREAM_STALL_SETTINGS: StreamStallSettings = {
-  firstEventMs: 180_000,
-  idleMs: 120_000,
+  // 中转站高 effort / 长思考首包常超过 3 分钟；过早 idle 会 timeout→胡乱 retry，用户感觉又慢又重试。
+  firstEventMs: 240_000,
+  idleMs: 180_000,
   graceMs: 3_000,
   // 有真实进展时不按总时长截断；无进展仍受首包/空闲保护。
   requestMs: 0,

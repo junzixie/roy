@@ -1,108 +1,80 @@
 # Roy 0.20.21 发布说明
 
 发布日期：2026-10-29
+最后核对：2026-10-30（修正了初版说明中与实际代码不符的条目）
 
 ## 🎯 本次更新重点
 
-### 1. 压缩性能优化 ⚡
-- **默认阈值降至 60%**（之前 80%），更早触发压缩
-- **保留 tokens 减半至 6000**（之前 12000），压缩更彻底
-- **预期效果**：压缩频率从 90次/天 → 10-15次/天，卡顿减少 66%
+### 1. 手机遥控域名更新 📱
+- 公网域名更新为 `agares.online`
+- 支持 Cloudflare Tunnel 和 SSH 隧道
+- 配置参考 [手机遥控配置指南](../scripts/check-mobile-remote.md)
 
 ### 2. DeepSeek 优化模式 🚀
-- **会员专享功能**
-- **所有模型都可以使用**（不限于 DeepSeek）
-- 针对 DeepSeek 模型有奇效
-- 包含档位选择、简单回合降档等优化
+- 会员专享功能
+- 包含档位选择、简单回合降档等机制
+- 推理回传默认关闭：补 thinking 签名会让历史推理真的开始回传，实测是净增输入成本
 
-### 3. 手机遥控域名更新 📱
-- 公网域名更新为 `agares.online`
-- 修复公网访问配置
-- 支持 Cloudflare Tunnel 和 SSH 隧道
-
-### 4. 性能优化基础 🔧
-- 新增性能优化 Hook（防抖、节流、虚拟滚动）
-- 安装 react-virtuoso 4.18.19（为下版本虚拟化做准备）
-- 诊断并记录 181 个定时器和超大组件问题
+### 3. 压缩策略：残留归因与保留预算收紧
+- 压缩后残留会按「固定开销 / 保留原文 / 摘要 / 其他」拆开归因
+- 残留偏高时自动收紧下次的保留原文预算
 
 ---
 
-## 📦 安装包信息
+## ⚠️ 初版说明中的错误（已更正）
 
-- **版本号**：0.20.21
-- **平台**：Windows x64
-- **安装包大小**：待确认
-- **构建时间**：2026-10-29 01:xx
+初版发布说明写了几条与实际代码不符的内容，这里明确更正，避免继续误导：
 
----
+| 初版说法 | 实际情况 |
+| --- | --- |
+| 「默认阈值降至 60%」 | **从未生效**。真正生效的默认是 90%（`PI_AUTO_COMPACTION_THRESHOLD_RATIO`） |
+| 「保留 tokens 减半至 6000」 | **从未生效**。实际是 12000（`PI_COMPACTION_KEEP_RECENT_TOKENS`） |
+| 「压缩频率 90次/天 → 10-15次/天，卡顿减少 66%」 | 无实测依据。这些模块零引用，没有任何代码改动会影响压缩频率 |
+| 「新增性能优化 Hook（防抖、节流、虚拟滚动）」 | Hook 文件零引用且编译不过，已删除 |
+| 「安装 react-virtuoso 4.18.19」 | 依赖已从 `package.json` 移除（零引用） |
+| 让用户在 settings.json 写 `compactionThresholdPercent` / `keepRecentTokens` | 这两个字段在 `AppSettings` 里**不存在**，写入无效 |
 
-## 🔧 技术改进
+**根因**：`ca65bf7` 一次性创建了 5 个「优化模块」，但它们从未被任何生产代码 import。
+其中 2 个甚至编译不过（引用不存在的模块/字段）。文档把这些标成了「✅ 已完成」，
+但同一份文档的下文又写着「待集成」——两个说法自相矛盾，实际是后者为准。
 
-### 已完成
-1. ✅ 压缩配置写入 settings.json（60%/6000）
-2. ✅ DeepSeek 模式权限配置（会员专享）
-3. ✅ 手机遥控公网域名（agares.online）
-4. ✅ 性能优化 Hook 和诊断工具
-5. ✅ 渲染卡顿解决方案文档
-6. ✅ react-virtuoso 安装（虚拟化库）
-7. ✅ npm 依赖修复（改用 bun）
-
-### 待集成（下个版本）
-- 虚拟化长列表（AgentMessages、LeftSidebar）
-- 清理定时器泄漏
-- 拆分超大组件
-- 性能监控面板
-
----
-
-## 📊 性能提升预期
-
-| 优化项 | 优化前 | 优化后 | 改善 |
-|--------|--------|--------|------|
-| 压缩频率 | 90次/天 | 10-15次/天 | 83% ↓ |
-| 压缩卡顿 | 2-5秒 | < 1秒 | 66% ↓ |
-| 对话轮次 | 15轮触发 | 25轮触发 | 66% ↑ |
+这些模块已于 2026-10-30 删除，同时删除了 4 份失实文档。
 
 ---
 
 ## ⚙️ 使用建议
 
 ### 1. 启用 DeepSeek 优化模式（会员）
-打开 Roy → 设置 → 工作模式 → 选择"DeepSeek 优化模式"
+打开 Roy → 设置 → 工作模式 → 选择「DeepSeek 优化模式」
 
-### 2. 调整压缩配置（可选）
-打开 `~/.roy/settings.json`，调整：
-```json
-{
-  "compactionThresholdPercent": 60,  // 40-90 可调
-  "keepRecentTokens": 6000           // 2000-12000 可调
-}
-```
+### 2. 压缩阈值
+现在由「设置 → 使用体验」统一管理，固定为「保留缓存 · 90%」（对齐 Claude / Codex 近满再压）。
+**不要手改 settings.json** 里的 `compactionThresholdPercent` / `keepRecentTokens`——那两个字段不存在。
 
 ### 3. 配置手机遥控公网访问
-参考：[check-mobile-remote.md](E:/AIproject/02-roy-harness/scripts/check-mobile-remote.md)
+参考 [手机遥控配置指南](../scripts/check-mobile-remote.md)
 
 ---
 
 ## 🐛 已知问题
 
-1. npm 依赖问题已修复（现在使用 bun）
-2. 虚拟化渲染尚未集成（下版本）
-3. 定时器清理需要手动检查
+1. 虚拟化渲染尚未集成（`LeftSidebar.tsx` 5267 行、`AgentMessages` 长列表滚动仍有压力）
+2. 日志噪声偏大：`<logs>/main.log` 里 `[代理配置]` 重复行曾占 16.7%，已修（改为状态变化才记录）
+3. `getSessionContextUsageRatio` 曾全量读 messages 文件，已改为尾部倒读（实测提速约 20 倍）
 
 ---
 
 ## 📝 提交记录
 
-- e0a6e5d: perf: 添加性能优化 Hook 和渲染优化方案
-- ca65bf7: feat: 优化压缩性能和手机遥控公网配置
+- e0a6e5d: perf: 添加性能优化 Hook 和渲染优化方案（Hook 已于 2026-10-30 删除）
+- ca65bf7: feat: 优化压缩性能和手机遥控公网配置（其中 5 个优化模块从未接线，已于 2026-10-30 删除）
 - ec30d94: 压缩策略：硬顶生效、保留预算收紧、残留归因
 
 ---
 
 ## 🔗 相关文档
 
-- [压缩优化配置](E:/AIproject/02-roy-harness/apps/electron/src/main/lib/adapters/pi-compaction-config.ts)
-- [性能优化 Hook](E:/AIproject/02-roy-harness/apps/electron/src/renderer/hooks/useRenderOptimization.ts)
-- [渲染卡顿解决方案](E:/AIproject/02-roy-harness/docs/渲染卡顿解决方案.md)
-- [手机遥控配置指南](E:/AIproject/02-roy-harness/scripts/check-mobile-remote.md)
+- [压缩阈值与预算](../packages/shared/src/utils/pi-compaction.ts)
+- [上下文压缩-近满再压](上下文压缩-近满再压.md)
+- [渲染卡顿解决方案](渲染卡顿解决方案.md)
+- [手机遥控配置指南](../scripts/check-mobile-remote.md)

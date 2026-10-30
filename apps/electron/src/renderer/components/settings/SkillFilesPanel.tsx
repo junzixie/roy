@@ -22,6 +22,7 @@ import {
   RefreshCw,
 } from 'lucide-react'
 import type { SkillFileNode, SkillFileContent } from '@roy/shared'
+import { formatBytes as __sharedFormatBytes } from '@roy/shared'
 import { Button } from '@/components/ui/button'
 import { SettingsCard } from './primitives'
 import { cn } from '@/lib/utils'
@@ -426,7 +427,7 @@ export function SkillFilesPanel({ workspaceSlug, skillSlug, contentVersion = 0, 
               <div className="flex-1 flex flex-col items-center justify-center text-xs text-muted-foreground p-6 text-center gap-2">
                 <FileIcon size={20} />
                 <div className="font-mono">{fileContent.relativePath}</div>
-                <div>二进制文件（{formatSize(fileContent.size)}），不支持内置编辑</div>
+                <div>二进制文件（{__sharedFormatBytes(fileContent.size)}），不支持内置编辑</div>
               </div>
             ) : (
               <>
@@ -436,7 +437,7 @@ export function SkillFilesPanel({ workspaceSlug, skillSlug, contentVersion = 0, 
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
                     <span className="text-[10px] text-muted-foreground">
-                      {formatSize(fileContent.size)}
+                      {__sharedFormatBytes(fileContent.size)}
                     </span>
                     {!editing ? (
                       <Button size="sm" variant="ghost" onClick={() => setEditing(true)} disabled={missingFile} className="h-7">
@@ -694,8 +695,3 @@ function CreatePlaceholder({
   )
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / 1024 / 1024).toFixed(2)} MB`
-}

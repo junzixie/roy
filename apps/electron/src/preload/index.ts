@@ -638,6 +638,9 @@ export interface ElectronAPI {
   /** 获取单个会话的 Pi entry 绑定（列表已不含该字段） */
   getAgentSessionBindings: (id: string) => Promise<Record<string, string> | null>
 
+  /** 读取会话的上下文压缩历史（只读账本） */
+  getContextLedger: (id: string) => Promise<import('@roy/shared').ContextLedgerEntry[]>
+
   /** 获取归档会话数量，不返回归档元数据 */
   countArchivedAgentSessions: () => Promise<number>
 
@@ -974,6 +977,8 @@ export interface ElectronAPI {
     /** 原始绝对路径（持久化用这个） */
     path: string
     kind: 'video' | 'scene'
+    /** 封面图的 roy-file URL；没有封面时为空串 */
+    preview: string
   }>>
 
   /** 本机是否存在 Wallpaper Engine 创意工坊目录 */
@@ -2212,6 +2217,11 @@ const electronAPI: ElectronAPI = {
   /** 列表不再携带 piEntryBindings，分支探索时再按会话取回。 */
   getAgentSessionBindings: (id: string): Promise<Record<string, string> | null> => {
     return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_SESSION_BINDINGS, id)
+  },
+
+  /** 读取会话的上下文压缩历史（只读账本）。 */
+  getContextLedger: (id: string): Promise<import('@roy/shared').ContextLedgerEntry[]> => {
+    return ipcRenderer.invoke(AGENT_IPC_CHANNELS.GET_CONTEXT_LEDGER, id)
   },
 
   createAgentSession: (title?: string, channelId?: string, workspaceId?: string, modelId?: string, isDraft?: boolean) => {

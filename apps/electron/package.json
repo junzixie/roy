@@ -1,8 +1,8 @@
 {
   "name": "@roy/electron",
   "productName": "Roy",
-  "version": "0.20.21",
-  "description": "Roy，为专业用户设计的 Agent",
+  "version": "0.20.24",
+  "description": "Roy锛屼负涓撲笟鐢ㄦ埛璁捐鐨?Agent",
   "main": "dist/main.cjs",
   "author": {
     "name": "Roy"
@@ -18,11 +18,15 @@
     "build:main": "esbuild src/main/index.ts --bundle --platform=node --format=cjs --outfile=dist/main.cjs --external:electron --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-ai --external:@earendil-works/pi-mcp --external:sharp",
     "build:agent-runtime": "esbuild src/utility/agent-runtime.ts --bundle --platform=node --format=cjs --outfile=dist/agent-runtime.cjs --external:electron --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-ai --external:@earendil-works/pi-mcp --external:sharp",
     "build:terminal-runtime": "esbuild src/utility/terminal-runtime.ts --bundle --platform=node --format=cjs --outfile=dist/terminal-runtime.cjs --external:electron --external:node-pty",
-    "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --outfile=dist/preload.cjs --external:electron",
+    "build:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --outfile=dist/preload.cjs --external:electron && bun run build:preload-splash && bun run build:preload-ball && bun run build:preload-login",
+    "build:preload-splash": "esbuild src/preload/splash.ts --bundle --platform=node --format=cjs --outfile=dist/preload-splash.cjs --external:electron",
+    "build:preload-ball": "esbuild src/preload/floating-ball.ts --bundle --platform=node --format=cjs --outfile=dist/preload-floating-ball.cjs --external:electron",
+    "build:preload-login": "esbuild src/preload/login.ts --bundle --platform=node --format=cjs --outfile=dist/preload-login.cjs --external:electron",
     "watch:main": "esbuild src/main/index.ts --bundle --platform=node --format=cjs --outfile=dist/main.cjs --external:electron --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-ai --external:@earendil-works/pi-mcp --external:sharp --watch=forever",
     "watch:agent-runtime": "esbuild src/utility/agent-runtime.ts --bundle --platform=node --format=cjs --outfile=dist/agent-runtime.cjs --external:electron --external:@earendil-works/pi-coding-agent --external:@earendil-works/pi-ai --external:@earendil-works/pi-mcp --external:sharp --watch=forever",
     "watch:terminal-runtime": "esbuild src/utility/terminal-runtime.ts --bundle --platform=node --format=cjs --outfile=dist/terminal-runtime.cjs --external:electron --external:node-pty --watch=forever",
     "watch:preload": "esbuild src/preload/index.ts --bundle --platform=node --format=cjs --outfile=dist/preload.cjs --external:electron --watch=forever",
+    "watch:preload-splash": "esbuild src/preload/splash.ts --bundle --platform=node --format=cjs --outfile=dist/preload-splash.cjs --external:electron --watorever",
     "build:renderer": "vite build",
     "build:resources": "bun run scripts/copy-resources.ts",
     "build:agent-island-native": "bun run scripts/build-agent-island-native.ts",

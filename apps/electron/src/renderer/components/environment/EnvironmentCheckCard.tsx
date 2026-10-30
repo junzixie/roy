@@ -25,6 +25,7 @@ import {
   type InstallerDownloadState,
 } from '@/atoms/environment'
 import type { InstallerDownloadRequest } from '@roy/shared'
+import { formatBytes as __sharedFormatBytes } from '@roy/shared'
 
 type CheckStatus = 'checking' | 'success' | 'warning' | 'error'
 
@@ -125,13 +126,6 @@ function CardAction({ action, toolName }: { action: CardAction; toolName: string
   return null
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
-}
-
 function detectArch(): 'x64' | 'arm64' {
   const ua = navigator.userAgent || ''
   if (/arm64|aarch64/i.test(ua)) return 'arm64'
@@ -216,10 +210,10 @@ function DownloadAction({ installerId, toolName }: { installerId: string; toolNa
       <div className="mt-1.5 space-y-1.5">
         <div className="flex items-center justify-between text-[11px] text-muted-foreground">
           <span>
-            下载中 {pct}%（{formatBytes(state.downloaded ?? 0)} /{' '}
-            {formatBytes(state.total ?? 0)}）
+            下载中 {pct}%（{__sharedFormatBytes(state.downloaded ?? 0)} /{' '}
+            {__sharedFormatBytes(state.total ?? 0)}）
           </span>
-          <span>{formatBytes(state.speed ?? 0)}/s</span>
+          <span>{__sharedFormatBytes(state.speed ?? 0)}/s</span>
         </div>
         <div className="h-1.5 w-full overflow-hidden rounded-full bg-secondary">
           <div

@@ -63,6 +63,41 @@ const eventBus = new AgentEventBus()
 const adapter = new ModeSwitchingAdapter()
 const orchestrator = new AgentOrchestrator(adapter, eventBus)
 
+/** 空闲静默预压缩：回合结束后由编排层预约，到期后走 headless compact（不落盘用户气泡）。 */
+orchestrator.setIdlePrecompactRunner(async (payload) => {
+  const meta = (() => {
+    try { return getAgentSessionMeta(payload.sessionId) } catch { return undefined }
+  })()
+  const channelId = payload.channelId || meta?.channelId
+  if (!channelId) {
+    console.warn(`[Agent 服务] 空闲预压缩跳过：无渠道 session=${payload.sessionId.slice(0, 8)}`)
+    return
+  }
+  await runAgentHeadless(
+    {
+      sessionId: payload.sessionId,
+      userMessage: '/compact',
+      channelId,
+      modelId: payload.modelId || meta?.modelId,
+      workspaceId: payload.workspaceId || meta?.workspaceId,
+      idleCompact: true,
+      triggeredBy: 'external',
+      startedAt: Date.now(),
+    },
+    {
+      onError: (error) => {
+        console.warn(`[Agent 服务] 空闲预压缩失败 session=${payload.sessionId.slice(0, 8)}: ${error}`)
+      },
+      onComplete: () => {
+        console.log(`[Agent 服务] 空闲预压缩结束 session=${payload.sessionId.slice(0, 8)}`)
+      },
+      onTitleUpdated: () => undefined,
+      source: 'bridge',
+    },
+  )
+})
+
+
 /** 导出 EventBus 供飞书 Bridge 等外部服务订阅事件 */
 export { eventBus as agentEventBus }
 
@@ -294,6 +329,12 @@ export async function runAgent(
   input: AgentRunInput,
   webContents: WebContents,
 ): Promise<void> {
+  // 渲染进程不得伪造空闲预压缩；仅主进程调度器可置位。
+  if ((input as { idleCompact?: unknown }).idleCompact) {
+    const { idleCompact: _drop, ...rest } = input as AgentSendInput & { idleCompact?: boolean }
+    input = rest
+  }
+
   const route = registerWebContents(input.sessionId, webContents)
   // deferred queue runs carry their queue id as an internal extension.
   const queueMessageId = (input as Partial<AgentDeferredQueueMessageInput>).queueMessageId

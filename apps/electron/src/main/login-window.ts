@@ -10,35 +10,13 @@ import { app, BrowserWindow, ipcMain, nativeImage } from 'electron'
 import { join } from 'node:path'
 import { getActiveUsername, getLocalUsersState, selectLocalUser, verifyLocalUserPassword } from './lib/local-users'
 
-const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Roy</title><style>
-*{box-sizing:border-box}html,body{margin:0;height:100%;font-family:"Microsoft YaHei UI","Segoe UI",sans-serif;background:transparent}
-.card{position:absolute;inset:8px;border-radius:16px;background:#faf9f6;box-shadow:0 8px 30px rgba(0,0,0,.18);padding:28px 30px;display:flex;flex-direction:column;-webkit-app-region:drag}
-.top{display:flex;align-items:center;gap:12px;margin-bottom:18px}.top img{width:40px;height:40px;border-radius:10px}
-h1{font-size:18px;margin:0;color:#1f2328}.sub{font-size:12.5px;color:#6b7280;margin-top:2px}
-.x{position:absolute;right:14px;top:12px;border:0;background:transparent;font-size:18px;color:#9ca3af;cursor:pointer;-webkit-app-region:no-drag}
-.list{display:flex;flex-direction:column;gap:6px;overflow:auto;max-height:190px;-webkit-app-region:no-drag}
-.u{display:flex;align-items:center;gap:10px;padding:9px 12px;border:1px solid #e5e7eb;border-radius:10px;cursor:pointer;background:#fff}
-.u:hover{border-color:#cbd5e1}.u.on{border-color:#2f6b4f;box-shadow:0 0 0 2px rgba(47,107,79,.15)}
-.av{width:30px;height:30px;border-radius:50%;background:#2f6b4f;color:#fff;display:flex;align-items:center;justify-content:center;font-size:14px}
-.n{font-size:14px;color:#111827}.m{font-size:11.5px;color:#9ca3af}
-.pw{margin-top:14px;-webkit-app-region:no-drag}input{width:100%;height:36px;border:1px solid #d1d5db;border-radius:8px;padding:0 10px;font-size:14px;outline:none}
-input:focus{border-color:#2f6b4f}.err{color:#dc2626;font-size:12.5px;min-height:18px;margin-top:6px}
-.go{margin-top:auto;height:38px;border:0;border-radius:10px;background:#2f6b4f;color:#fff;font-size:14px;cursor:pointer;-webkit-app-region:no-drag}.go:disabled{opacity:.5}
-</style></head><body><div class="card"><button class="x" id="x" title="退出 Roy">×</button>
-<div class="top"><img id="logo" alt=""><div><h1>选择用户</h1><div class="sub">每个用户的会话、项目和设置都是分开的</div></div></div>
-<div class="list" id="list"></div><div class="pw" id="pwbox" hidden><input id="pw" type="password" placeholder="输入密码"></div><div class="err" id="err"></div>
-<button class="go" id="go">进入 Roy</button></div><script>
-const {ipcRenderer}=require('electron');let users=[],sel='';
-const $=id=>document.getElementById(id);
-function render(){const l=$('list');l.textContent='';for(const u of users){const d=document.createElement('div');d.className='u'+(u.username===sel?' on':'');
-const a=document.createElement('div');a.className='av';a.textContent=(u.displayName||u.username).slice(0,1);
-const t=document.createElement('div');const n=document.createElement('div');n.className='n';n.textContent=u.displayName;const m=document.createElement('div');m.className='m';m.textContent=(u.primary?'第一个用户':u.username)+(u.hasPassword?' · 有密码':'');t.append(n,m);d.append(a,t);
-d.onclick=()=>{sel=u.username;$('err').textContent='';render()};l.append(d)}
-const cur=users.find(u=>u.username===sel);$('pwbox').hidden=!(cur&&cur.hasPassword);if(cur&&cur.hasPassword)setTimeout(()=>$('pw').focus(),0)}
-async function go(){$('go').disabled=true;const r=await ipcRenderer.invoke('login:submit',sel,$('pw').value);$('go').disabled=false;if(!r.ok){$('err').textContent=r.error;$('pw').select()}}
-$('go').onclick=go;$('pw').onkeydown=e=>{if(e.key==='Enter')go()};$('x').onclick=()=>ipcRenderer.send('login:quit');
-ipcRenderer.invoke('login:init').then(d=>{users=d.users;sel=d.active;$('logo').src=d.logo||'';render()});
-</script></body></html>`
+/*
+ * 页面本体已移到 resources/login/index.html。
+ *
+ * 以前这里是一整个模板字符串，用 `data:text/html` 加载——这是密码入口，
+ * 却因此关掉了全部三层隔离（页面里要 require('electron')）。改成独立文件后，
+ * 页面只能通过 preload 暴露的 window.royLogin 说话。
+ */
 
 /** 需要时弹登录窗；返回后接着启动（选了别的用户会直接重启，不会返回） */
 export function runLoginGate(): Promise<void> {
@@ -48,7 +26,14 @@ export function runLoginGate(): Promise<void> {
     const win = new BrowserWindow({
       width: 400, height: 470, frame: false, transparent: true, resizable: false, maximizable: false,
       fullscreenable: false, show: false, center: true, title: 'Roy',
-      webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false },
+      webPreferences: {
+        // 密码入口必须三层隔离全开：页面走独立文件 + 专用 preload。
+        // 以前这里是 nodeIntegration: true / contextIsolation: false / sandbox: false。
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        preload: join(__dirname, 'preload-login.cjs'),
+      },
     })
     const mine = (e: Electron.IpcMainInvokeEvent | Electron.IpcMainEvent): boolean => !win.isDestroyed() && e.sender.id === win.webContents.id
     let done = false
@@ -95,7 +80,8 @@ export function runLoginGate(): Promise<void> {
     })
     ipcMain.on('login:quit', (e) => { if (mine(e)) app.exit(0) })
     win.on('closed', () => { if (!done) app.exit(0) })
-    void win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(PAGE)}`)
+    const resourcesDir = app.isPackaged ? process.resourcesPath : join(__dirname, 'resources')
+    void win.loadFile(join(resourcesDir, 'login', 'index.html'))
     win.once('ready-to-show', () => win.show())
   })
 }

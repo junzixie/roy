@@ -47,17 +47,64 @@ function isHiddenTool(block: SDKContentBlock, hidden?: ReadonlySet<string>): boo
  * 过滤空白块，并去掉与相邻正文内容完全相同的思考块
  * （部分渠道会把同一段话同时放进 thinking 与 text，界面上会重复出现）。
  */
+/** 单段正文若是「整段复制粘贴翻倍」，收成一半。 */
+function collapseSelfDuplicatedText(raw: string): string {
+  const text = raw.trim()
+  if (text.length < 8) return raw
+  const mid = Math.floor(text.length / 2)
+  const left = text.slice(0, mid).trim()
+  const right = text.slice(mid).trim()
+  if (left && left === right) return text.slice(0, mid)
+  // 中间多一个空行的翻倍：A\n\nA
+  const parts = text.split(/\n\n+/)
+  if (parts.length === 2 && normalizeForCompare(parts[0] ?? '') === normalizeForCompare(parts[1] ?? '') && (parts[0] ?? '').trim()) {
+    return parts[0]!.trimEnd()
+  }
+  return raw
+}
+
 export function cleanAssistantBlocks(blocks: SDKContentBlock[]): IndexedContentBlock[] {
   const indexed = blocks
-    .map((block, index) => ({ block, index }))
+    .map((block, index) => {
+      if (block.type === 'text') {
+        const collapsed = collapseSelfDuplicatedText((block as SDKTextBlock).text ?? '')
+        if (collapsed !== (block as SDKTextBlock).text) {
+          return { block: { ...block, text: collapsed } as SDKContentBlock, index }
+        }
+      }
+      return { block, index }
+    })
     .filter(({ block }) => !isBlankContentBlock(block))
 
-  return indexed.filter(({ block }, i) => {
+  const withoutEchoedThinking = indexed.filter(({ block }, i) => {
     if (block.type !== 'thinking') return true
     const own = normalizeForCompare(textOf(block) ?? '')
     const neighbours = [indexed[i - 1], indexed[i + 1]]
     return !neighbours.some((n) => n?.block.type === 'text' && normalizeForCompare(textOf(n.block) ?? '') === own)
   })
+
+  // 续写误把完整答复再贴一遍时，同一回合会出现相邻两段相同正文；只留后面更完整的那段。
+  const result: IndexedContentBlock[] = []
+  for (const item of withoutEchoedThinking) {
+    if (item.block.type !== 'text') {
+      result.push(item)
+      continue
+    }
+    const curr = normalizeForCompare(textOf(item.block) ?? '')
+    const prev = result[result.length - 1]
+    if (prev?.block.type === 'text') {
+      const prevText = normalizeForCompare(textOf(prev.block) ?? '')
+      if (prevText && curr && (curr === prevText || curr.startsWith(prevText))) {
+        result[result.length - 1] = item
+        continue
+      }
+      if (prevText && curr && prevText.startsWith(curr)) {
+        continue
+      }
+    }
+    result.push(item)
+  }
+  return result
 }
 
 /**

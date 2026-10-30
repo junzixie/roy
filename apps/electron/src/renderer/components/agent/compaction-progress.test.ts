@@ -64,6 +64,47 @@ describe('context compaction progress overlay state', () => {
     })
   })
 
+    test('auto threshold success stays silent like Claude/Codex', () => {
+    expect(getContextCompactionProgress([], false, {
+      status: 'success',
+      reason: 'threshold',
+      thresholdTokens: 160_000,
+      tokensBefore: 180_000,
+      tokensAfter: 82_000,
+      tokensReclaimed: 98_000,
+      fixedOverheadTokens: 42_000,
+    })).toBeUndefined()
+  })
+
+  test('manual success still shows reclaim telemetry', () => {
+    expect(getContextCompactionProgress([], false, {
+      status: 'success',
+      reason: 'manual',
+      thresholdTokens: 160_000,
+      tokensBefore: 180_000,
+      tokensAfter: 82_000,
+      tokensReclaimed: 98_000,
+      fixedOverheadTokens: 42_000,
+    })).toMatchObject({
+      status: 'success',
+      detail: expect.stringContaining('释放 98K'),
+    })
+  })
+
+  test('auto threshold running stays silent; manual running still shows', () => {
+    expect(getContextCompactionProgress([], true, {
+      status: 'running',
+      reason: 'threshold',
+    })).toBeUndefined()
+    expect(getContextCompactionProgress([], true, {
+      status: 'running',
+      reason: 'manual',
+    })).toMatchObject({
+      status: 'running',
+      label: '正在整理上下文',
+    })
+  })
+
   test('retains a no-op terminal state after live messages are cleared', () => {
     expect(getContextCompactionProgress([], false, {
       status: 'noop',
@@ -89,14 +130,20 @@ describe('context compaction progress overlay state', () => {
     expect(shouldClearRetainedCompactionForResumedStream(true, undefined, undefined)).toBe(false)
   })
 
-  test('maps successful compaction to a terminal state', () => {
+    test('maps successful manual compaction to a terminal state', () => {
     expect(getContextCompactionProgress([
-      systemMessage({ subtype: 'compact_boundary', summary: '已完成的工作已整理。' }),
+      systemMessage({ subtype: 'compact_boundary', summary: '已完成的工作已整理。', compactionReason: 'manual' }),
     ], false, undefined)).toMatchObject({
       status: 'success',
       label: '上下文已压缩',
       summary: '已完成的工作已整理。',
     })
+  })
+
+  test('auto compact_boundary stays silent in history progress', () => {
+    expect(getContextCompactionProgress([
+      systemMessage({ subtype: 'compact_boundary', summary: '已完成的工作已整理。', compactionReason: 'threshold' }),
+    ], false, undefined)).toBeUndefined()
   })
 
   test('does not revive an old compaction boundary after Pi continues with assistant or task work', () => {

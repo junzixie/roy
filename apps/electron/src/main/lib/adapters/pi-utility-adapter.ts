@@ -303,7 +303,11 @@ export class PiUtilityAdapter {
         pending.input.onModelResolved?.(String(callbackPayload?.model ?? ''))
         break
       case 'context_window':
-        pending.input.onContextWindow?.(Number(callbackPayload?.contextWindow ?? 0))
+        pending.input.onContextWindow?.(
+          Number(callbackPayload?.contextWindow ?? 0),
+          callbackPayload?.trustedWindow === true,
+          typeof callbackPayload?.compactionThresholdTokens === 'number' ? callbackPayload.compactionThresholdTokens : undefined,
+        )
         break
       case 'retry':
         pending.input.onRetry?.(callbackPayload?.update as never)

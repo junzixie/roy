@@ -235,7 +235,12 @@ function resolveQwenTokenPlanTestModelId(modelId?: string, models?: ChannelModel
 }
 
 function resolveDeepSeekModelsUrl(baseUrl: string): string {
-  return `${new URL(baseUrl.trim()).origin}/models`
+  // 官方：模型列表在 origin/models（对话根可能是 /anthropic 或 /v1）
+  // 中转站：按 OpenAI 兼容规则，从用户填的 Base URL 推导 /models（如 …/v1 → …/v1/models）
+  if (isOfficialDeepSeekBaseUrl(baseUrl)) {
+    return `${new URL(baseUrl.trim()).origin}/models`
+  }
+  return resolveOpenAIModelsUrl(baseUrl)
 }
 
 function resolveKimiModelsUrl(baseUrl: string): string {
@@ -399,7 +404,11 @@ function readConfig(): ChannelsConfig {
   }
 
   try {
-    const raw = readFileSync(configPath, 'utf-8')
+    // 去掉 UTF-8 BOM：用户用记事本 / 部分编辑器改过 channels.json 后，
+    // 文件头会带 U+FEFF，JSON.parse 直接抛 "Unexpected token '﻿'"。
+    // 结果是整个渠道配置读不出来、回落成空列表，用户会以为模型全丢了。
+    // 日志里这条错误已经出现过 13 次，都是同一个原因。
+    const raw = readFileSync(configPath, 'utf-8').replace(/^\uFEFF/, '')
     const parsed = JSON.parse(raw) as ChannelsConfig
     const schemaMigration = migrateConfig(parsed)
     const presetModelUpdate = applyPresetModelCandidateUpdates(schemaMigration.config)
@@ -535,26 +544,29 @@ export function listChannels(): Channel[] {
   const config = readConfig()
   if (seedBuiltinChannels(config)) writeConfig(config)
 
-  // 首次使用：如果没有 DeepSeek 渠道，自动创建预设
-  const hasDeepSeek = config.channels.some(
-    (c) => c.provider === 'deepseek' || c.baseUrl.includes('api.deepseek.com'),
-  )
-  if (!hasDeepSeek) {
-    const now = Date.now()
-    const presetChannel: Channel = {
-      id: randomUUID(),
-      name: 'DeepSeek',
-      provider: 'deepseek',
-      baseUrl: PROVIDER_DEFAULT_URLS.deepseek,
-      apiKey: encryptApiKey(''),
-      models: cloneModels(DEEPSEEK_PRESET_MODELS),
-      enabled: false,
-      createdAt: now,
-      updatedAt: now,
+  // DeepSeek 预设只补一次：用户删掉后记住不再注入（与 builtinChannelsSeeded 同语义）
+  if (!config.deepseekPresetSeeded) {
+    const hasDeepSeek = config.channels.some(
+      (c) => c.provider === 'deepseek' || c.baseUrl.includes('api.deepseek.com'),
+    )
+    if (!hasDeepSeek) {
+      const now = Date.now()
+      const presetChannel: Channel = {
+        id: randomUUID(),
+        name: 'DeepSeek',
+        provider: 'deepseek',
+        baseUrl: PROVIDER_DEFAULT_URLS.deepseek,
+        apiKey: encryptApiKey(''),
+        models: cloneModels(DEEPSEEK_PRESET_MODELS),
+        enabled: false,
+        createdAt: now,
+        updatedAt: now,
+      }
+      config.channels.push(presetChannel)
+      console.log('[渠道管理] 已自动创建 DeepSeek 预设渠道')
     }
-    config.channels.push(presetChannel)
+    config.deepseekPresetSeeded = true
     writeConfig(config)
-    console.log('[渠道管理] 已自动创建 DeepSeek 预设渠道')
     return config.channels
   }
 
@@ -673,6 +685,13 @@ export function deleteChannel(id: string): void {
   }
 
   const removed = config.channels.splice(index, 1)[0]!
+  // 用户主动删掉 DeepSeek 后，即使旧配置没有 deepseekPresetSeeded，也不要再偷偷补回
+  if (
+    removed.provider === 'deepseek'
+    || removed.baseUrl.includes('api.deepseek.com')
+  ) {
+    config.deepseekPresetSeeded = true
+  }
   writeConfig(config)
 
   console.log(`[渠道管理] 已删除渠道: ${removed.name} (${removed.id})`)
@@ -2193,38 +2212,57 @@ async function fetchDeepSeekModels(
   apiKey: string,
   proxyUrl?: string,
 ): Promise<FetchModelsResult> {
-  const url = resolveDeepSeekModelsUrl(baseUrl)
+  const primary = resolveDeepSeekModelsUrl(baseUrl)
+  const candidates = [primary]
+  // 中转站偶发只开 /v1/models 或只开 origin/models：主地址失败时再试一个备选
+  try {
+    const originModels = `${new URL(baseUrl.trim()).origin}/models`
+    const v1Models = resolveOpenAIModelsUrl(baseUrl)
+    for (const alt of [v1Models, originModels]) {
+      if (!candidates.includes(alt)) candidates.push(alt)
+    }
+  } catch {
+    // baseUrl 非法时只打 primary，错误由下方请求体现
+  }
+
   const fetchFn = getFetchFn(proxyUrl)
+  let lastError = '拉取模型列表失败'
 
-  const response = await fetchFn(url, withTimeout({
-    method: 'GET',
-    headers: {
-      Accept: 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-  }))
+  for (const url of candidates) {
+    try {
+      const response = await fetchFn(url, withTimeout({
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+      }))
 
-  if (!response.ok) {
-    const result = await normalizeHttpResponse(response)
-    return { success: false, message: result.message, models: [] }
+      if (!response.ok) {
+        const result = await normalizeHttpResponse(response)
+        lastError = result.message
+        continue
+      }
+
+      const data = await response.json() as { data?: OpenAIModelItem[] }
+      const items = data.data ?? []
+      const models: ChannelModel[] = items.map((item) => ({
+        id: item.id,
+        name: item.id,
+        enabled: true,
+      }))
+      models.sort((a, b) => a.id.localeCompare(b.id))
+      return {
+        success: true,
+        message: `成功获取 ${models.length} 个模型`,
+        models,
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error)
+    }
   }
 
-  const data = await response.json() as { data?: OpenAIModelItem[] }
-  const items = data.data ?? []
-
-  const models: ChannelModel[] = items.map((item) => ({
-    id: item.id,
-    name: item.id,
-    enabled: true,
-  }))
-
-  models.sort((a, b) => a.id.localeCompare(b.id))
-
-  return {
-    success: true,
-    message: `成功获取 ${models.length} 个模型`,
-    models,
-  }
+  return { success: false, message: lastError, models: [] }
 }
 
 /**

@@ -36,6 +36,8 @@ export function inferCodexAlignedGPT5ContextWindow(modelId: string | undefined):
     case 'gpt-5.6-sol':
     case 'gpt-5.6-terra':
     case 'gpt-5.6-luna': return CODEX_GPT_56_CONTEXT_WINDOW
+    // Roy stable channel model ID; same Codex-confirmed 372K window as GPT-5.6.
+    case 'gpt-6.1-sol': return CODEX_GPT_56_CONTEXT_WINDOW
     case 'gpt-6-astra': return CODEX_GPT_56_CONTEXT_WINDOW
     default: return undefined
   }

@@ -40,4 +40,14 @@ describe('一轮结束时的上下文用量', () => {
     })
     expect(next.inputTokens).toBe(50_000)
   })
+
+  test('保留后端可信窗口标记和实际压缩点', () => {
+    const next = applyAgentEvent(base, {
+      type: 'usage_update',
+      usage: { contextWindow: 372_000, contextWindowTrusted: true, compactionThresholdTokens: 297_600 },
+    })
+    expect(next.contextWindow).toBe(372_000)
+    expect(next.contextWindowTrusted).toBe(true)
+    expect(next.compactionThresholdTokens).toBe(297_600)
+  })
 })

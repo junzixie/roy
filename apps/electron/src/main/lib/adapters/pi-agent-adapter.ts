@@ -14,6 +14,7 @@ import { createVisionPreflightRunner } from './vision-attachment-preflight'
  */
 
 import { snapshotBeforeWrite } from '../file-checkpoints'
+import { appendContextLedger } from '../context-ledger'
 import { randomUUID } from 'node:crypto'
 import { FastHarness } from './fast-harness'
 import { spawn } from 'node:child_process'
@@ -42,9 +43,19 @@ import {
   calculatePiAutoCompactionReserveTokens,
   calculatePiAutoCompactionThresholdTokens,
   calculatePiCompactionKeepRecentTokens,
+  cacheKeyForSession,
   describeCompactionResidual,
   isCompactionResidualTooHigh,
   normalizeCompactionPercent,
+  resolveCacheRetention,
+  pruneOversizedToolResultsInMessages,
+  pruneToolResultsTiered,
+  estimatePiMessagesChars,
+  PI_TIERED_PRUNE_RECENT_KEEP,
+  PI_TIERED_PRUNE_MID_CHARS,
+  PI_TIERED_PRUNE_OLD_CHARS,
+  truncateToolResultContent,
+  type PiCompactionCacheStrategy,
   inferReasoningTransport,
   isCodexFastModeSupportedModel,
   PI_COMPACTION_KEEP_RECENT_TOKENS,
@@ -119,7 +130,7 @@ type BashToolOptions = import('@earendil-works/pi-coding-agent').BashToolOptions
 type PowerShellToolOptions = import('@earendil-works/pi-coding-agent').PowerShellToolOptions
 type SkillLoadResult = ReturnType<ResourceLoader['getSkills']>
 
-const PI_NATIVE_MAX_RETRIES = 3
+const PI_NATIVE_MAX_RETRIES = 2
 const PI_NATIVE_RETRY_BASE_DELAY_MS = 1_000
 const MAX_AUTOMATIC_COMPACTION_CONTINUATIONS = 20
 
@@ -180,7 +191,7 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   /** Pi final assistant UI UUID → 持久树状 session entry ID。 */
   onPiEntryBindings?: (bindings: Record<string, string>) => void
   onModelResolved?: (model: string) => void
-  onContextWindow?: (contextWindow: number) => void
+  onContextWindow?: (contextWindow: number, trustedWindow?: boolean, compactionThresholdTokens?: number) => void
   onRetry?: (update: import('./pi-retry-control').PiRetryUpdate) => void
   /** 渲染进程创建的本轮流式开始时间，用于隔离迟到的 native retry 事件。 */
   retryRunStartedAt?: number
@@ -208,6 +219,8 @@ export interface PiAgentQueryOptions extends AgentQueryInput {
   runtimeEnv?: AgentRuntimeEnv
   /** 手动压缩请求：走 pi 原生 session.compact()，而非把 /compact 当普通 prompt 发给模型 */
   compactRequest?: boolean
+  /** 压缩原因覆盖：idle=空闲预压缩（UI 静默）；默认手动仍为 manual */
+  compactRequestReason?: 'manual' | 'idle'
   /** ChatGPT Codex Fast Mode；仅 openai-codex 的受支持模型实际注入 priority service tier。 */
   codexFastMode?: boolean
   /** Pi 的 OAuth credential store 使用真实 expires 和 refresh，不读取 ~/.pi。 */
@@ -829,11 +842,19 @@ function createTerminatingJsonToolResult(payload: unknown): AgentToolResult<unkn
 }
 
 export const PI_COMPACTION_CONTINUATION_PROMPT = `<roy_compaction_continuation>
-当前会话上下文已经安全压缩。请依据压缩摘要、保留的最近上下文和已持久化的交接状态，继续完成原始用户任务。
+当前会话上下文已经压缩。沿着原始用户目标继续执行，不要把压缩动作本身当成任务完成。
 
-- 不要重复已经完成或已提交的操作；先核验当前状态。
-- 若仍有工作，立即执行下一项具体行动。
-- 只有原始需求全部完成时才给出最终答复；若确实受阻，明确说明阻塞原因。
+恢复时按以下账本顺序快速核验：
+1. 用户原始目标与仍有效的约束；
+2. 已完成事项和有证据支持的结果（文件、提交、命令输出）；
+3. 尚未完成事项、决定与待确认/待批准项；
+4. 下一项最小可验证动作和对应验证方式。
+
+遵守这些边界：
+- 只把明确成功且可观察的操作标记为已完成；不把计划、尝试或未验证结果当作事实。
+- 先检查工作区/任务状态，避免重复已提交的副作用操作；不确定时做只读核验。
+- 如果工作区的 todo、plan、handoff 或检查点文件包含更新的事实，结合最近对话和压缩摘要核对后再继续。
+- 仍有工作就立即做下一项；只有原始目标全部完成才给最终答复，受阻则说明具体阻塞和可复现的下一步。
 </roy_compaction_continuation>`
 
 export function planPiCompactionContinuation(options: {
@@ -1450,22 +1471,24 @@ export function installRuntimeGuardHooks(session: AgentSession, guard: AgentRunt
       terminate: previousResult?.terminate ?? context.result.terminate,
     }
     const sanitizedContent = sanitizeToolResultImageContent(resultAfterPreviousHooks.content)
+    // Feibo：大工具输出先裁再入上下文，避免几轮 read/shell 就把窗口顶满、过早压缩。
+    const truncatedContent = truncateToolResultContent(sanitizedContent)
     const guardedResult = guard.applyToolResult({
       ...resultAfterPreviousHooks,
-      content: sanitizedContent,
+      content: truncatedContent,
     })
 
     if (
       !previousResult
       && guardedResult.terminate === context.result.terminate
-      && sanitizedContent === context.result.content
+      && truncatedContent === context.result.content
     ) {
       return undefined
     }
 
     return {
       ...previousResult,
-      content: sanitizedContent,
+      content: truncatedContent,
       terminate: guardedResult.terminate,
     }
   }
@@ -1485,6 +1508,18 @@ export function installRuntimeGuardHooks(session: AgentSession, guard: AgentRunt
 export class PiAgentAdapter implements AgentProviderAdapter {
   constructor(private readonly fastHarnessEnabled = false) {}
   private activeSessions = new Map<string, ActivePiSession>()
+  /**
+   * 按会话记住被「压缩后残留偏高」收紧过的保留原文预算。
+   *
+   * 必须是实例级而不是 `query()` 局部变量：`query()` 每轮对话都会重新进入，
+   * 而残留收紧的本意是「下次压缩前把预算调小」——写进局部变量等于每轮开头
+   * 又被 `calculatePiCompactionKeepRecentTokens()` 覆盖回默认 12000，收紧永远
+   * 不生效，日志里那句「下次保留原文预算 → X」也就是假的。
+   *
+   * 同理不能只依赖 `settingsManager.applyOverrides()`：那个 manager 是
+   * `SettingsManager.inMemory()`，在 `query()` 内新建，query 结束即丢弃。
+   */
+  private tightenedKeepRecentBySession = new Map<string, number>()
   /** abort 兜底强制清理后通知编排层，让本轮不必等 Pi 真正 idle 就能收尾。 */
   onForceAbort?: (sessionId: string) => void
 
@@ -1558,28 +1593,47 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const sessionManager = sessionFile
         ? sdk.SessionManager.open(sessionFile, input.piSessionDir, cwd)
         : sdk.SessionManager.create(cwd, input.piSessionDir)
-      const { modelRuntime, model } = await buildModel(sdk, input)
-      // 压缩阈值由用户在设置里调（默认 80%）；调低更早压缩，调高尽量保留原文
+      const { modelRuntime, model, contextWindowTrusted } = await buildModel(sdk, input)
+      // 压缩阈值由用户在设置里调（默认 90%/cache-preserving）；调低更早压缩，调高尽量保留原文
       const autoCompactPercent = normalizeCompactionPercent(getSettings().autoCompactPercent)
+      const compactionStrategy: PiCompactionCacheStrategy = autoCompactPercent === 90
+        ? 'cache-preserving'
+        : autoCompactPercent === 70
+          ? 'aggressive'
+          : 'balanced'
+      const strategyPresetPercent = autoCompactPercent === 90 || autoCompactPercent === 80 || autoCompactPercent === 70
+      const configuredCompactionRatio = strategyPresetPercent ? undefined : autoCompactPercent / 100
       const autoCompactionReserveTokens = calculatePiAutoCompactionReserveTokens(
         model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        autoCompactPercent / 100,
+        configuredCompactionRatio,
+        { trustedWindow: contextWindowTrusted, strategy: compactionStrategy },
       )
       /** 本次运行的压缩点（token），用于压缩后判断残留是否仍然过高 */
       const autoCompactionThresholdTokens = calculatePiAutoCompactionThresholdTokens(
         model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
-        autoCompactPercent / 100,
+        configuredCompactionRatio,
+        { trustedWindow: contextWindowTrusted, strategy: compactionStrategy },
       )
       let compactContextRequested = false
       let pendingCompactionContinuation: string | undefined
       let automaticCompactionContinuations = 0
       /**
        * 本次运行实际生效的保留原文预算。
-       * 压缩后残留偏高时会在 compaction_end 里逐步收紧（见下方诊断分支），
-       * 因为 Pi 不允许连续压缩两次，只能等到下次压缩前生效。
+       *
+       * 起始值优先取「上一次压缩因残留偏高而收紧过的值」：跨轮生效必须走实例级
+       * 缓存，否则每轮都会被算回默认 12000，收紧形同虚设（见字段注释）。
+       * 压缩后残留仍偏高时会继续在 compaction_end 里收紧。
+       *
+       * 必须再用当前窗口算出的默认值夹一次上限：用户可能在中途换了小窗口模型，
+       * 上一轮收紧前的预算（或已放宽到的值）对新窗口来说可能过大，直接沿用会让
+       * 压缩后立刻又撞线。
        */
-      let currentKeepRecentTokens = calculatePiCompactionKeepRecentTokens(
+      const windowDefaultKeepRecent = calculatePiCompactionKeepRecentTokens(
         model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+      )
+      let currentKeepRecentTokens = Math.min(
+        this.tightenedKeepRecentBySession.get(input.sessionId) ?? windowDefaultKeepRecent,
+        windowDefaultKeepRecent,
       )
       /** 照 FeiBo：模型只说不做 / 工具调用漏进正文时，最多提醒 2 次 */
       let stallNudges = 0
@@ -1588,6 +1642,8 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       let pendingTerminalResult: SDKMessage | undefined
       /** 当前压缩是否紧随一个成功完成的主 Agent turn。 */
       let completedAgentTurnPendingCompaction = false
+      const idlePrecompactRequest = input.compactRequest === true && input.compactRequestReason === 'idle'
+      let activeCompactionLedgerId: string | undefined
       const builtinTools = buildBuiltinToolDefinitions(sdk, cwd, input.canUseTool, input.runtimeEnv, input.sessionId)
       const safeReads = new Set(builtinTools.filter((tool) => ['read', 'grep', 'find', 'ls'].includes(tool.name)))
       const customTools = [
@@ -1620,12 +1676,15 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const settingsManager = sdk.SettingsManager.inMemory({
         // 使用 Pi SDK 原生压缩策略：
         // - 手动压缩由 session.compact() 触发；
-        // - 自动压缩在上下文达到模型窗口的约 80% 时触发；Pi 以 reserveTokens 表示预留空间。
+        // - 自动压缩在上下文达到有效窗口的 90% 时触发（见
+        //   PI_AUTO_COMPACTION_THRESHOLD_RATIO）；Pi 以 reserveTokens 表示预留空间，
+        //   reserveTokens = 有效窗口 - 阈值 token。
         compaction: {
           enabled: true,
           reserveTokens: autoCompactionReserveTokens,
-          // 显式给值：Pi 默认 20000 会让压缩后残留偏高（实测仍有 8.6 万），
-          // 压缩收益有限并很快再次撞线。残留仍偏高时 compaction_end 会继续收紧。
+          // 显式给值：Pi 上游默认 20000，压完仍偏高（实测残留 8.6 万），很快再次撞线。
+          // 这里按窗口取固定预算与 10% 窗口的较小者（下限 2000），见
+          // calculatePiCompactionKeepRecentTokens。残留仍偏高时 compaction_end 会继续收紧。
           keepRecentTokens: currentKeepRecentTokens,
         },
         // Pi 原生 retry 通过 agent.continue() 在同一 transcript 中恢复，能保留已完成的
@@ -1743,8 +1802,22 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       const previousTransformContext = session.agent.transformContext
       session.agent.transformContext = async (messages, signal) => {
         const transformed = await previousTransformContext?.(messages, signal) ?? messages
+        // 分级瘦身：只在「体积已经不小」时启用，避免每轮都改前缀导致缓存命中率下降。
+        // 对照 DSH 的 compaction/prune（单会话里能跑到 35 次），这类裁剪是
+        // 「小步控制体积」，而不是每轮重写整段历史。
+        // 门槛取正式压缩阈值的 40%：明显还没到该压缩的时候就不动。
+        const pruneGateChars = Math.floor(autoCompactionThresholdTokens * 0.4) * 3
+        const tiered = estimatePiMessagesChars(transformed) >= pruneGateChars
+          ? pruneToolResultsTiered(transformed, {
+            recentKeep: PI_TIERED_PRUNE_RECENT_KEEP,
+            midChars: PI_TIERED_PRUNE_MID_CHARS,
+            oldChars: PI_TIERED_PRUNE_OLD_CHARS,
+          })
+          : undefined
+        // 分级瘦身没生效时，仍保留原有的一刀切保护（超长单条照样裁）。
+        const pruned = pruneOversizedToolResultsInMessages(tiered?.messages ?? transformed)
         if (input.assistantMode === 'conversation') {
-          const recent = transformed.filter(m => m.role === 'user' || m.role === 'assistant').slice(-12).flatMap(m => {
+          const recent = pruned.filter(m => m.role === 'user' || m.role === 'assistant').slice(-12).flatMap(m => {
             if (m.role !== 'user' && m.role !== 'assistant') return []
             const content = typeof m.content === 'string' ? m.content : m.content.filter(b => b.type === 'text').map(b => b.text).join('\n')
             if (!content.trim()) return []
@@ -1752,7 +1825,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
           })
           return sanitizePiMessageImageContent([{ role: 'system', content: input.systemPrompt, timestamp: Date.now() }, ...recent])
         }
-        return sanitizePiMessageImageContent(transformed)
+        return sanitizePiMessageImageContent(pruned)
       }
       if (projectInstructionScope) {
         const previousPrepareNextTurnWithContext = session.agent.prepareNextTurnWithContext
@@ -1803,9 +1876,28 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       // 看门狗：模型流长时间没有新事件就主动断开，交给 Pi 自动重试，不再干等上游掐断连接。
       const providerStreamFn = withStreamStallWatchdog(session.agent.streamFunction)
       const liveProviderStreamFn = withLiveThinkingLevel(providerStreamFn, () => session.thinkingLevel)
+      // 提示缓存：把 cacheRetention 与会话亲和 key 注入每次 provider 请求。
+      // Pi 默认 cacheRetention='short'，而 short 在非 api.openai.com 的地址上
+      // 不会发送 prompt_cache_key【已核 pi-ai/dist/api/openai-completions.js:578-581】。
+      // 改动前 Roy 全仓未传过 cacheRetention【实测 grep 0 行】，所以这条路径上
+      // 缓存亲和字段一直没被发出去。是否真的命中缓存属于上游行为，未核实；
+      // 这里只保证「用户选高缓存时字段确实带上」。
+      const cacheRetention = resolveCacheRetention(getSettings().promptCacheMode)
+      const cacheKey = cacheKeyForSession(session.sessionId)
+      const cachedProviderStreamFn: typeof liveProviderStreamFn = (requestModel, context, options) => liveProviderStreamFn(
+        requestModel,
+        context,
+        {
+          ...options,
+          cacheRetention,
+          // 会话 ID 作为亲和 key：同一会话的多轮请求尽量落到同一缓存分片。
+          // sessionId 缺失或过长时保持 undefined，退化成服务端按前缀匹配。
+          ...(cacheKey && options?.sessionId === undefined ? { sessionId: cacheKey } : {}),
+        },
+      )
       session.agent.streamFunction = (requestModel, context, options) => runWithPiRequestProxy(
         requestProxyDispatcher,
-        () => liveProviderStreamFn(requestModel, context, options),
+        () => cachedProviderStreamFn(requestModel, context, options),
       )
       installResponseBudget(session, responseBudget)
       installRuntimeGuardHooks(session, runtimeGuard)
@@ -1821,7 +1913,7 @@ export class PiAgentAdapter implements AgentProviderAdapter {
 
       input.onSessionId?.(session.sessionId, session.sessionFile)
       input.onModelResolved?.(session.model?.id ?? input.model ?? 'default')
-      input.onContextWindow?.(model.contextWindow ?? DEFAULT_CONTEXT_WINDOW)
+      input.onContextWindow?.(model.contextWindow ?? DEFAULT_CONTEXT_WINDOW, contextWindowTrusted, autoCompactionThresholdTokens)
 
       queue.push({
         type: 'system',
@@ -2018,8 +2110,23 @@ export class PiAgentAdapter implements AgentProviderAdapter {
               } as unknown as SDKMessage)
               break
             case 'compaction_start': {
-              const afterCompletedTurn = completedAgentTurnPendingCompaction
+              const afterCompletedTurn = completedAgentTurnPendingCompaction || idlePrecompactRequest
               completedAgentTurnPendingCompaction = false
+              activeCompactionLedgerId = randomUUID()
+              appendContextLedger({
+                id: activeCompactionLedgerId,
+                sessionId: session.sessionId,
+                at: Date.now(),
+                kind: 'compaction',
+                status: 'started',
+                reason: event.reason,
+                strategy: compactionStrategy,
+                contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+                thresholdTokens: autoCompactionThresholdTokens,
+                fixedOverheadTokens,
+                keepRecentTokens: currentKeepRecentTokens,
+                archiveRef: session.sessionFile,
+              })
               // 压缩开始（手动 /compact 或自动阈值/溢出触发）：发前端已识别的 compacting system 消息，
               // 展示「正在压缩上下文...」分隔符。此前迁移遗漏了该事件，导致自动压缩与手动压缩都无 UI。
               // 只有成功完成主 turn 后才进入可验收完成态；运行中压缩仍保持 running。
@@ -2028,46 +2135,120 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                 subtype: 'compacting',
                 session_id: session.sessionId,
                 afterCompletedTurn,
+                compactionReason: (idlePrecompactRequest ? 'idle' : event.reason),
+                compactionContextWindow: model.contextWindow,
+                compactionThresholdTokens: autoCompactionThresholdTokens,
+                compactionStrategy,
               } as unknown as SDKMessage)
               break
             }
             case 'compaction_end':
+              if (!event.aborted && event.result) {
+                const tokensAfter = event.result.estimatedTokensAfter
+                appendContextLedger({
+                  id: activeCompactionLedgerId ?? randomUUID(),
+                  sessionId: session.sessionId,
+                  at: Date.now(),
+                  kind: 'compaction',
+                  status: 'success',
+                  reason: event.reason,
+                  strategy: compactionStrategy,
+                  contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+                  thresholdTokens: autoCompactionThresholdTokens,
+                  tokensBefore: event.result.tokensBefore,
+                  tokensAfter,
+                  ...(tokensAfter != null && { tokensReclaimed: event.result.tokensBefore - tokensAfter }),
+                  fixedOverheadTokens,
+                  keepRecentTokens: currentKeepRecentTokens,
+                  summaryChars: event.result.summary.length,
+                  archiveRef: session.sessionFile,
+                })
+              } else {
+                const noop = !!event.errorMessage && isCompactionNoopError(event.errorMessage)
+                appendContextLedger({
+                  id: activeCompactionLedgerId ?? randomUUID(),
+                  sessionId: session.sessionId,
+                  at: Date.now(),
+                  kind: 'compaction',
+                  status: event.aborted ? 'failed' : noop ? 'noop' : 'failed',
+                  reason: event.reason,
+                  strategy: compactionStrategy,
+                  contextWindow: model.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+                  thresholdTokens: autoCompactionThresholdTokens,
+                  fixedOverheadTokens,
+                  keepRecentTokens: currentKeepRecentTokens,
+                  archiveRef: session.sessionFile,
+                  ...(event.errorMessage && { error: event.errorMessage }),
+                })
+              }
+              activeCompactionLedgerId = undefined
               // 压缩收益不看是否触发，而看压完降到多少：残留仍明显高于阈值时记一条诊断，
               // 便于在日志里定位「反复压缩但仍很慢」的会话。
-              if (!event.aborted && event.result?.estimatedTokensAfter != null
-                && isCompactionResidualTooHigh(event.result.estimatedTokensAfter, autoCompactionThresholdTokens)) {
-                const keepRecent = currentKeepRecentTokens
-                const breakdown = describeCompactionResidual(
+              if (!event.aborted && event.result?.estimatedTokensAfter != null) {
+                // 预算收紧/回弹统一按「残留是否偏高」判定，两种方向都要能走，
+                // 否则收紧是单向棘轮：长期会话被一路压到下限后再也不会恢复。
+                const residualHigh = isCompactionResidualTooHigh(
                   event.result.estimatedTokensAfter,
-                  keepRecent,
-                  event.result.summary?.length ?? 0,
-                  fixedOverheadTokens,
+                  autoCompactionThresholdTokens,
                 )
-                // 残留偏高时收紧下一次压缩的保留预算：Pi 不允许连续压缩两次
-                // （prepareCompaction 在末条为 compaction 时直接返回 undefined），
-                // 所以只能在下次压缩前把预算调小，而不是立刻再压一次。
-                // 基准用预算值而不是 breakdown.keepRecent：后者会被总量截断，
-                // 总量小时用它会把预算砍得过头。
-                if (keepRecent > PI_COMPACTION_KEEP_RECENT_MIN_TOKENS) {
-                  const tightened = Math.max(
-                    PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
-                    Math.floor(keepRecent * 0.5),
+                // 复用本次运行开头算好的窗口默认预算，避免两处各算一次后漂移
+                const defaultKeepRecent = windowDefaultKeepRecent
+                if (residualHigh) {
+                  const keepRecent = currentKeepRecentTokens
+                  const breakdown = describeCompactionResidual(
+                    event.result.estimatedTokensAfter,
+                    keepRecent,
+                    event.result.summary?.length ?? 0,
+                    fixedOverheadTokens,
                   )
-                  currentKeepRecentTokens = tightened
-                  settingsManager.applyOverrides({
-                    compaction: { keepRecentTokens: tightened },
-                  })
+                  // 残留偏高时收紧下一次压缩的保留预算：Pi 不允许连续压缩两次
+                  // （prepareCompaction 在末条为 compaction 时直接返回 undefined），
+                  // 所以只能在下次压缩前把预算调小，而不是立刻再压一次。
+                  // 基准用预算值而不是 breakdown.keepRecent：后者会被总量截断，
+                  // 总量小时用它会把预算砍得过头。
+                  if (keepRecent > PI_COMPACTION_KEEP_RECENT_MIN_TOKENS) {
+                    const tightened = Math.max(
+                      PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
+                      Math.floor(keepRecent * 0.5),
+                    )
+                    currentKeepRecentTokens = tightened
+                    // 双写：settingsManager 让本轮的后续压缩立即生效；
+                    // 实例级 Map 让下一轮 query() 仍沿用收紧后的预算（跨轮生效的关键）。
+                    this.tightenedKeepRecentBySession.set(input.sessionId, tightened)
+                    settingsManager.applyOverrides({
+                      compaction: { keepRecentTokens: tightened },
+                    })
+                  }
+                  console.warn(
+                    `[pi-adapter] 压缩后残留偏高: ${event.result.tokensBefore} → ${event.result.estimatedTokensAfter} token`
+                    + `（阈值 ${autoCompactionThresholdTokens}）`
+                    + `；构成：固定开销 ${breakdown.fixedOverhead}`
+                    + ` / 保留原文 ${breakdown.keepRecent}`
+                    + ` / 摘要 ${breakdown.summary}`
+                    + ` / 其他 ${breakdown.unexplained}`
+                    + `；占比最大：${breakdown.dominant}`
+                    + `；下次保留原文预算 → ${currentKeepRecentTokens}`,
+                  )
+                } else if (currentKeepRecentTokens < defaultKeepRecent) {
+                  // 残留已回落到阈值内：逐步放回默认预算（每次 +50%，避免一次跳回
+                  // 让下一轮又撞线）。只有真的被收紧过才走这条，正常会话零开销。
+                  const relaxed = Math.min(
+                    defaultKeepRecent,
+                    Math.floor(currentKeepRecentTokens * 1.5),
+                  )
+                  if (relaxed > currentKeepRecentTokens) {
+                    currentKeepRecentTokens = relaxed
+                    this.tightenedKeepRecentBySession.set(input.sessionId, relaxed)
+                    settingsManager.applyOverrides({
+                      compaction: { keepRecentTokens: relaxed },
+                    })
+                    console.log(
+                      `[pi-adapter] 压缩后残留已回落: ${event.result.estimatedTokensAfter} token`
+                      + `（阈值 ${autoCompactionThresholdTokens}）`
+                      + `；下次保留原文预算放宽 → ${relaxed}（默认 ${defaultKeepRecent}）`,
+                    )
+                  }
                 }
-                console.warn(
-                  `[pi-adapter] 压缩后残留偏高: ${event.result.tokensBefore} → ${event.result.estimatedTokensAfter} token`
-                  + `（阈值 ${autoCompactionThresholdTokens}）`
-                  + `；构成：固定开销 ${breakdown.fixedOverhead}`
-                  + ` / 保留原文 ${breakdown.keepRecent}`
-                  + ` / 摘要 ${breakdown.summary}`
-                  + ` / 其他 ${breakdown.unexplained}`
-                  + `；占比最大：${breakdown.dominant}`
-                  + `；下次保留原文预算 → ${currentKeepRecentTokens}`,
-                )
               }
               if (pendingNativeOverflowRecovery && event.reason === 'overflow') {
                 pendingNativeOverflowRecovery = false
@@ -2084,8 +2265,15 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                   subtype: 'compact_boundary',
                   session_id: session.sessionId,
                   summary: event.result.summary,
+                  compactionReason: (idlePrecompactRequest ? 'idle' : event.reason),
+                  compactionContextWindow: model.contextWindow,
+                  compactionThresholdTokens: autoCompactionThresholdTokens,
+                  compactionStrategy,
+                  ...(event.result.tokensBefore != null && { compactionTokensBefore: event.result.tokensBefore }),
+                  ...(event.result.estimatedTokensAfter != null && event.result.tokensBefore != null && { compactionTokensReclaimed: event.result.tokensBefore - event.result.estimatedTokensAfter }),
+                  ...(fixedOverheadTokens > 0 && { compactionFixedOverheadTokens: fixedOverheadTokens }),
                   // 仅手动压缩展示 Pi 的压缩后预估值，自动压缩保持既有行为。
-                  ...(event.reason === 'manual' && event.result.estimatedTokensAfter != null && {
+                  ...(event.result.estimatedTokensAfter != null && {
                     compactionEstimatedTokensAfter: event.result.estimatedTokensAfter,
                   }),
                 } as unknown as SDKMessage)
@@ -2096,6 +2284,10 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                   session_id: session.sessionId,
                   compact_result: 'failed',
                   compact_error: '上下文压缩已取消。',
+                  compactionReason: (idlePrecompactRequest ? 'idle' : event.reason),
+                  compactionContextWindow: model.contextWindow,
+                  compactionThresholdTokens: autoCompactionThresholdTokens,
+                  compactionStrategy,
                 } as unknown as SDKMessage)
               } else if (event.errorMessage && !isCompactionNoopError(event.errorMessage)) {
                 queue.push({
@@ -2104,6 +2296,22 @@ export class PiAgentAdapter implements AgentProviderAdapter {
                   session_id: session.sessionId,
                   compact_result: 'failed',
                   compact_error: event.errorMessage,
+                  compactionReason: (idlePrecompactRequest ? 'idle' : event.reason),
+                  compactionContextWindow: model.contextWindow,
+                  compactionThresholdTokens: autoCompactionThresholdTokens,
+                  compactionStrategy,
+                } as unknown as SDKMessage)
+              } else if (event.errorMessage && isCompactionNoopError(event.errorMessage)) {
+                queue.push({
+                  type: 'system',
+                  subtype: 'status',
+                  session_id: session.sessionId,
+                  compact_result: 'noop',
+                  compact_error: event.errorMessage,
+                  compactionReason: (idlePrecompactRequest ? 'idle' : event.reason),
+                  compactionContextWindow: model.contextWindow,
+                  compactionThresholdTokens: autoCompactionThresholdTokens,
+                  compactionStrategy,
                 } as unknown as SDKMessage)
               }
               break
@@ -2508,5 +2716,6 @@ export class PiAgentAdapter implements AgentProviderAdapter {
       rejectActiveReady(active, createAbortError())
     }
     this.activeSessions.clear()
+    this.tightenedKeepRecentBySession.clear()
   }
 }

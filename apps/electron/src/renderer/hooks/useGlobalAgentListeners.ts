@@ -290,7 +290,11 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
         return [{ type: 'model_resolved', model: evt.model }]
       case 'context_window':
         // main 进程从 SDK result 拿到的真实 contextWindow，转成 usage_update 让 atom 合并到 streamState
-        return [{ type: 'usage_update', usage: { contextWindow: evt.contextWindow } }]
+        return [{ type: 'usage_update', usage: {
+          contextWindow: evt.contextWindow,
+          contextWindowTrusted: evt.trustedWindow,
+          compactionThresholdTokens: evt.compactionThresholdTokens,
+        } }]
       case 'permission_mode_changed':
         return [{ type: 'permission_mode_changed', mode: evt.mode }]
       case 'run_resumed':
@@ -503,10 +507,25 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
           status: 'success',
           summary: sMsg.summary,
           ...(typeof estimatedTokensAfter === 'number' && estimatedTokensAfter > 0 && { estimatedTokensAfter }),
+          reason: sMsg.compactionReason,
+          contextWindow: sMsg.compactionContextWindow,
+          thresholdTokens: sMsg.compactionThresholdTokens,
+          strategy: sMsg.compactionStrategy,
+          tokensBefore: sMsg.compactionTokensBefore,
+          tokensAfter: estimatedTokensAfter,
+          tokensReclaimed: sMsg.compactionTokensReclaimed,
+          fixedOverheadTokens: sMsg.compactionFixedOverheadTokens,
         }]
       }
       if (sMsg.subtype === 'compacting') {
-        return [{ type: 'compacting', afterCompletedTurn: sMsg.afterCompletedTurn === true }]
+        return [{
+          type: 'compacting',
+          afterCompletedTurn: sMsg.afterCompletedTurn === true,
+          reason: sMsg.compactionReason,
+          contextWindow: sMsg.compactionContextWindow,
+          thresholdTokens: sMsg.compactionThresholdTokens,
+          strategy: sMsg.compactionStrategy,
+        }]
       }
       if (sMsg.subtype === 'status') {
         if (sMsg.status === 'compacting') {
@@ -518,6 +537,13 @@ function payloadToLegacyEvents(payload: AgentStreamPayload): AgentEvent[] {
             status: sMsg.compact_result,
             summary: sMsg.summary,
             message: sMsg.compact_error ?? sMsg.message,
+            reason: sMsg.compactionReason,
+            contextWindow: sMsg.compactionContextWindow,
+            thresholdTokens: sMsg.compactionThresholdTokens,
+            strategy: sMsg.compactionStrategy,
+            tokensBefore: sMsg.compactionTokensBefore,
+            tokensReclaimed: sMsg.compactionTokensReclaimed,
+            fixedOverheadTokens: sMsg.compactionFixedOverheadTokens,
           }]
         }
         if (typeof sMsg.compact_error === 'string') {

@@ -8,9 +8,19 @@
  * 默认关闭，在「设置 → 通用 → 桌面悬浮球」里打开。纯 HTML 小页面，不加载整个界面，几乎不占内存。
  */
 
-import { BrowserWindow, Menu, ipcMain, nativeImage, screen } from 'electron'
+import { BrowserWindow, Menu, ipcMain, nativeImage, screen, app } from 'electron'
 import { join } from 'node:path'
 import { getSettings, updateSettings } from './lib/settings-service'
+
+/**
+ * 静态资源目录：开发期在 `dist/resources`，打包后在 `process.resourcesPath`。
+ *
+ * 与 `main/index.ts:477` 的 `getStartupSplashPath` 同一套解析规则——这里单独写一份
+ * 而不是导出那个函数，是因为那个函数是启动页专用的，改动它会影响启动路径。
+ */
+function getResourcesDir(): string {
+  return app.isPackaged ? process.resourcesPath : join(__dirname, 'resources')
+}
 
 const SIZE = 64
 
@@ -22,29 +32,13 @@ export interface FloatingBallActions {
   quickTask: () => void
 }
 
-const PAGE = `<!doctype html><html><head><meta charset="utf-8"><style>
-html,body{margin:0;width:100%;height:100%;background:transparent;overflow:hidden;user-select:none}
-#b{position:absolute;left:6px;top:6px;width:52px;height:52px;border-radius:50%;cursor:pointer;
-background:#fff;box-shadow:0 2px 10px rgba(0,0,0,.22);display:flex;align-items:center;justify-content:center;transition:transform .15s}
-#b:hover{transform:scale(1.06)}
-#b img{width:40px;height:40px;border-radius:50%;pointer-events:none}
-#r{position:absolute;inset:-3px;border-radius:50%;border:3px solid transparent;pointer-events:none}
-.running #r{border-top-color:#3b82f6;border-right-color:#3b82f6;animation:s 1s linear infinite}
-.attention #r{border-color:#f59e0b;animation:p 1.2s ease-in-out infinite}
-.done #r{border-color:#22c55e;animation:p .6s ease-in-out 3}
-.error #r{border-color:#ef4444}
-@keyframes s{to{transform:rotate(360deg)}}@keyframes p{50%{opacity:.25}}
-@media (prefers-reduced-motion:reduce){#r{animation:none!important}}
-</style></head><body><div id="b" title="Roy：单击打开，右键更多，拖动换位置"><img id="i" alt=""><div id="r"></div></div><script>
-const {ipcRenderer}=require('electron');const b=document.getElementById('b');
-let down=null,moved=false;
-b.addEventListener('mousedown',e=>{if(e.button!==0)return;down={x:e.screenX,y:e.screenY};moved=false});
-window.addEventListener('mousemove',e=>{if(!down)return;const dx=e.screenX-down.x,dy=e.screenY-down.y;if(!moved&&Math.abs(dx)+Math.abs(dy)<4)return;moved=true;ipcRenderer.send('ball:drag',dx,dy);down={x:e.screenX,y:e.screenY}});
-window.addEventListener('mouseup',e=>{if(e.button!==0||!down)return;down=null;if(moved)ipcRenderer.send('ball:drag-end');else ipcRenderer.send('ball:click')});
-b.addEventListener('contextmenu',e=>{e.preventDefault();ipcRenderer.send('ball:menu')});
-ipcRenderer.on('ball:state',(_,s)=>{document.body.className=s});
-ipcRenderer.on('ball:icon',(_,u)=>{document.getElementById('i').src=u});
-</script></body></html>`
+/*
+ * 页面本体已移到 resources/floating-ball/index.html。
+ *
+ * 以前这里是一整个模板字符串，用 `data:text/html` 加载——既拿不到内容安全策略，
+ * 又逼着窗口关掉全部隔离（页面里要 require('electron')）。改成独立文件后，
+ * 页面只能通过 preload 暴露的 window.royBall 说话。
+ */
 
 class FloatingBall {
   private win: BrowserWindow | null = null
@@ -117,16 +111,25 @@ class FloatingBall {
       hasShadow: false,
       focusable: false,
       show: false,
-      webPreferences: { nodeIntegration: true, contextIsolation: false, sandbox: false, backgroundThrottling: true },
+      webPreferences: {
+        // 三层隔离全开：页面换成独立文件 + 专用 preload，不再 require('electron')。
+        // 以前这里是 nodeIntegration: true / contextIsolation: false / sandbox: false，
+        // 配合 data: URL 加载，任何一处插值被污染就是 RCE。
+        contextIsolation: true,
+        nodeIntegration: false,
+        sandbox: true,
+        backgroundThrottling: true,
+        preload: join(__dirname, 'preload-floating-ball.cjs'),
+      },
     })
     this.win.setAlwaysOnTop(true, 'floating')
     this.win.on('closed', () => { this.win = null })
-    void this.win.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(PAGE)}`)
+    void this.win.loadFile(join(getResourcesDir(), 'floating-ball', 'index.html'))
     this.win.webContents.once('did-finish-load', () => {
       if (!this.win) return
       try {
         // 图标转成 data URL 发给小页面，小页面不用读文件
-        const img = [join(process.resourcesPath ?? '', 'icon.png'), join(__dirname, 'resources', 'icon.png')]
+        const img = [join(getResourcesDir(), 'icon.png')]
           .map((p) => nativeImage.createFromPath(p)).find((i) => !i.isEmpty())
         if (img) this.win.webContents.send('ball:icon', img.resize({ width: 80, height: 80 }).toDataURL())
       } catch { /* 没图标就用白圆 */ }

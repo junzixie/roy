@@ -34,7 +34,7 @@ import {
   updateWallpaper,
 } from '@/atoms/appearance'
 import { wallpaperConfigAtom, wallpaperStatusAtom } from '@/atoms/wallpaper'
-import { PROCEDURAL_WALLPAPERS } from '@/lib/procedural-wallpapers'
+import { WallpaperPicker } from './WallpaperPicker'
 import { StartupAnimationSetting } from './StartupAnimationSetting'
 import { cn } from '@/lib/utils'
 import { Check } from 'lucide-react'
@@ -106,13 +106,10 @@ export function AppearanceSettings(): React.ReactElement {
     : themeMode
   const wallpaperOn = wallpaper.source === 'builtin' || wallpaper.source === 'dynamic' || wallpaper.source === 'custom'
 
-  /** 主题下方的内置动态壁纸：再点一次已选中的就关掉 */
-  const toggleBuiltinWallpaper = React.useCallback((id: string) => {
-    const selected = wallpaper.source === 'builtin' && wallpaper.dynamic === id
-    const next = selected ? { ...wallpaper, source: 'none' as const } : { ...wallpaper, source: 'builtin' as const, dynamic: id }
+  const handleWallpaperChange = React.useCallback((next: typeof wallpaper) => {
     setWallpaper(next)
     void updateWallpaper(next)
-  }, [wallpaper, setWallpaper])
+  }, [setWallpaper])
 
   /** 切换 Markdown 字号 */
   const handleMarkdownFontSizeChange = React.useCallback((value: string) => {
@@ -183,34 +180,10 @@ export function AppearanceSettings(): React.ReactElement {
                   </button>
                 )
               })}
-              {/* 内置动态壁纸：和主题卡片同一套样式，排在深色主题那一行下面；只开壁纸，不改配色 */}
-              {PROCEDURAL_WALLPAPERS.map((item) => {
-                const on = wallpaper.source === 'builtin' && wallpaper.dynamic === item.id
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    title={on ? '再点一次关掉壁纸' : item.description}
-                    onClick={() => toggleBuiltinWallpaper(item.id)}
-                    className={cn(
-                      'overflow-hidden rounded-xl border text-left transition-colors',
-                      on ? 'border-primary ring-1 ring-primary' : 'border-border/60 hover:border-border',
-                    )}
-                  >
-                    <div className="h-[64px]" style={{ background: item.thumb }} />
-                    <div className="flex items-center gap-1.5 border-t border-border/60 px-2.5 py-1.5">
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-[12.5px] font-medium text-foreground">{item.name}</span>
-                        <span className="block truncate text-[11px] text-foreground/45">动态壁纸 · {item.description}</span>
-                      </span>
-                      {on && <Check className="size-3.5 shrink-0 text-primary" />}
-                    </div>
-                  </button>
-                )
-              })}
             </div>
           </div>
 
+          <WallpaperPicker value={wallpaper} onChange={handleWallpaperChange} />
 
           <SettingsRow
             label="界面缩放"

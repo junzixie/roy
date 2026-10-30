@@ -1,22 +1,37 @@
-﻿import { describe, expect, test } from 'bun:test'
+import { describe, expect, test } from 'bun:test'
 import {
   PI_AUTO_COMPACTION_MAX_PERCENT,
   PI_AUTO_COMPACTION_MIN_PERCENT,
   PI_AUTO_COMPACTION_ABSOLUTE_MAX_TOKENS,
+  PI_IDLE_PRECOMPACT_WATERMARK_RATIO,
+  PI_IDLE_PRECOMPACT_DELAY_MS,
+  PI_IDLE_PRECOMPACT_NEAR_FULL_DELAY_MS,
+  PI_AUTO_COMPACTION_THRESHOLD_RATIO,
   PI_COMPACTION_KEEP_RECENT_TOKENS,
   PI_COMPACTION_KEEP_RECENT_MIN_TOKENS,
+  PI_COMPACTION_STRATEGY_RATIOS,
+  PI_SHORT_TOOL_OUTPUT_CHARS,
   calculatePiAutoCompactionReserveTokens,
   calculatePiAutoCompactionThresholdTokens,
+  calculatePiIdlePrecompactWatermarkTokens,
+  shouldScheduleIdlePrecompact,
+  resolveIdlePrecompactDelayMs,
   calculatePiCompactionKeepRecentTokens,
   describeCompactionResidual,
+  getPiCompactionStrategyRatio,
   isCompactionResidualTooHigh,
   normalizeCompactionPercent,
+  pruneOversizedToolResultsInMessages,
+  truncateToolResultContent,
+  truncateToolResultText,
 } from './pi-compaction'
+import { inferContextWindow } from './context-window'
 
 describe('自动压缩阈值', () => {
-  test('默认在 80% 开始压缩：预留 20% 窗口', () => {
-    expect(calculatePiAutoCompactionReserveTokens(100_000)).toBe(20_000)
-    expect(calculatePiAutoCompactionThresholdTokens(100_000)).toBe(80_000)
+  test('默认在 90% 开始压缩：预留 10% 窗口（对齐 Claude/Codex）', () => {
+    expect(PI_AUTO_COMPACTION_THRESHOLD_RATIO).toBe(0.9)
+    expect(calculatePiAutoCompactionReserveTokens(100_000)).toBe(10_000)
+    expect(calculatePiAutoCompactionThresholdTokens(100_000)).toBe(90_000)
   })
 
   test('给定用户设置的 70%，压缩点落在 70% 附近（预留向上取整，不会晚于 70%）', () => {
@@ -35,41 +50,64 @@ describe('自动压缩阈值', () => {
   })
 
   test('绝对上限优先于比例：大窗口的压缩点不会晚于硬顶', () => {
-    // 333333 的有效窗口截到 200000，70% = 140000，早于旧实现的 200000
-    expect(calculatePiAutoCompactionThresholdTokens(333_333, 0.7)).toBe(140_000)
-    expect(calculatePiAutoCompactionReserveTokens(333_333, 0.7)).toBe(333_333 - 140_000)
+    // 333333 的有效窗口截到 280000，70% = 196000，早于虚标窗口比例
+    expect(calculatePiAutoCompactionThresholdTokens(333_333, 0.7)).toBe(196_000)
+    expect(calculatePiAutoCompactionReserveTokens(333_333, 0.7)).toBe(333_333 - 196_000)
   })
 
   test('绝对上限：窗口虚标成 1,000,000 也不会等 80 万才压缩', () => {
     // 真实事故：渠道把 deepseek-v4.1-flash 标成 1M，80% = 80 万，
     // 会话堆到 24.6 万 token 时压缩一次都没触发，首字节 164 秒、被看门狗连断 3 次。
-    // 现在先把窗口截到 20 万再乘比例：默认 80% → 16 万。
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000)).toBe(160_000)
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.95)).toBe(190_000)
+    // 现在先把窗口截到 28 万再乘比例：默认 90% → 25.2 万。
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000)).toBe(252_000)
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.95)).toBe(266_000)
     // 对应的 reserveTokens 必须等于窗口减压缩点，否则 Pi 会按错的预留值算阈值
-    expect(calculatePiAutoCompactionReserveTokens(1_000_000)).toBe(1_000_000 - 160_000)
+    expect(calculatePiAutoCompactionReserveTokens(1_000_000)).toBe(1_000_000 - 252_000)
   })
 
   test('大窗口下用户设置的百分比依然生效（不再恒等于硬顶）', () => {
-    // 旧实现取 min(窗口×比例, 硬顶)，1M 窗口下任何比例都算成 20 万，设置等于失效。
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.5)).toBe(100_000)
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.7)).toBe(140_000)
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.9)).toBe(180_000)
+    // 旧实现取 min(窗口×比例, 硬顶)，1M 窗口下任何比例都恒等于硬顶，设置等于失效。
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.5)).toBe(140_000)
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.7)).toBe(196_000)
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.9)).toBe(252_000)
+  })
+
+  test('只有显式信任窗口时才不应用保守硬顶', () => {
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000)).toBe(252_000)
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.8, { trustedWindow: true })).toBe(800_000)
+    expect(calculatePiAutoCompactionReserveTokens(1_000_000, 0.8, { trustedWindow: true })).toBe(200_000)
+  })
+
+  test('GPT-6.1-Sol 使用已确认窗口而不是 200K 回退值', () => {
+    const window = inferContextWindow('gpt-6.1-sol')!
+    expect(window).toBe(372_000)
+    expect(calculatePiAutoCompactionThresholdTokens(window, 0.8, { trustedWindow: true })).toBe(297_600)
+  })
+
+  test('保留上下文策略让 compaction 更晚，激进策略更早', () => {
+    expect(getPiCompactionStrategyRatio('cache-preserving')).toBe(0.9)
+    expect(getPiCompactionStrategyRatio('balanced')).toBe(0.8)
+    expect(getPiCompactionStrategyRatio('aggressive')).toBe(0.7)
+    expect(calculatePiAutoCompactionThresholdTokens(100_000, undefined, { strategy: 'cache-preserving' })).toBe(90_000)
+    expect(calculatePiAutoCompactionThresholdTokens(100_000, undefined, { strategy: 'balanced' })).toBe(80_000)
+    expect(calculatePiAutoCompactionThresholdTokens(100_000, undefined, { strategy: 'aggressive' })).toBe(70_000)
+    expect(PI_COMPACTION_STRATEGY_RATIOS['cache-preserving']).toBeGreaterThan(PI_COMPACTION_STRATEGY_RATIOS.aggressive)
+    expect(calculatePiAutoCompactionThresholdTokens(100_000, 0.6, { strategy: 'cache-preserving' })).toBe(60_000)
   })
 
   test('绝对上限不干扰本来就小于它的窗口', () => {
-    expect(calculatePiAutoCompactionThresholdTokens(200_000)).toBe(160_000)
-    expect(calculatePiAutoCompactionThresholdTokens(8192)).toBe(6553)
+    expect(calculatePiAutoCompactionThresholdTokens(200_000)).toBe(180_000)
+    expect(calculatePiAutoCompactionThresholdTokens(8192)).toBe(7372)
   })
 
   test('给定 90%，只预留 10%', () => {
     expect(calculatePiAutoCompactionReserveTokens(100_000, 0.9)).toBe(10_000)
   })
 
-  test('非法比例回退到默认 80%，不会算出负数或零预留', () => {
-    expect(calculatePiAutoCompactionReserveTokens(100_000, 0)).toBe(20_000)
-    expect(calculatePiAutoCompactionReserveTokens(100_000, 1)).toBe(20_000)
-    expect(calculatePiAutoCompactionReserveTokens(100_000, Number.NaN)).toBe(20_000)
+  test('非法比例回退到默认 90%，不会算出负数或零预留', () => {
+    expect(calculatePiAutoCompactionReserveTokens(100_000, 0)).toBe(10_000)
+    expect(calculatePiAutoCompactionReserveTokens(100_000, 1)).toBe(10_000)
+    expect(calculatePiAutoCompactionReserveTokens(100_000, Number.NaN)).toBe(10_000)
   })
 
   test('contextWindow 非法时抛错，避免静默配置出错误的预留值', () => {
@@ -79,7 +117,7 @@ describe('自动压缩阈值', () => {
   })
 
   test('百分比收敛到允许区间内', () => {
-    expect(normalizeCompactionPercent(undefined)).toBe(80)
+    expect(normalizeCompactionPercent(undefined)).toBe(90)
     expect(normalizeCompactionPercent(10)).toBe(PI_AUTO_COMPACTION_MIN_PERCENT)
     expect(normalizeCompactionPercent(100)).toBe(PI_AUTO_COMPACTION_MAX_PERCENT)
     expect(normalizeCompactionPercent(72.6)).toBe(73)
@@ -147,11 +185,11 @@ describe('压缩点与 Pi 实际触发点一致', () => {
   })
 
   test('超过硬顶的窗口按硬顶比例算，不是按虚标窗口算', () => {
-    // 1M 窗口在 80% 下应压到 16 万，而不是 80 万
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.8)).toBe(160_000)
+    // 1M 窗口在 80% 下应压到 22.4 万，而不是 80 万
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.8)).toBe(224_000)
     // 但百分比依然生效：50% → 10 万，95% → 19 万
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.5)).toBe(100_000)
-    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.95)).toBe(190_000)
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.5)).toBe(140_000)
+    expect(calculatePiAutoCompactionThresholdTokens(1_000_000, 0.95)).toBe(266_000)
   })
 })
 
@@ -192,4 +230,64 @@ describe('压缩后残留归因', () => {
     expect(r.summary).toBe(0)
     expect(r.unexplained).toBe(0)
   })
+})
+
+describe('工具输出预截断（Feibo SHORT_TOOL_OUTPUT）', () => {
+  test('短文本不改动，返回原串', () => {
+    const text = 'hello tool output'
+    expect(truncateToolResultText(text)).toBe(text)
+  })
+
+  test('超长文本保留头尾并标注省略字数', () => {
+    const text = 'A'.repeat(20_000)
+    const out = truncateToolResultText(text)
+    expect(out.length).toBeLessThan(text.length)
+    expect(out).toContain('工具输出已截断')
+    expect(out.startsWith('A'.repeat(100))).toBe(true)
+    expect(out.endsWith('A'.repeat(100))).toBe(true)
+    expect(out.length).toBeLessThanOrEqual(PI_SHORT_TOOL_OUTPUT_CHARS + 80)
+  })
+
+  test('text part 数组只截断 text，未改动时保留原引用', () => {
+    const short = [{ type: 'text', text: 'ok' }]
+    expect(truncateToolResultContent(short)).toBe(short)
+
+    const long = [{ type: 'text', text: 'B'.repeat(15_000) }, { type: 'image', url: 'x' }]
+    const next = truncateToolResultContent(long)
+    expect(next).not.toBe(long)
+    expect(next[0]!.text).toContain('工具输出已截断')
+    expect(next[1]).toEqual(long[1])
+  })
+
+  test('消息列表里只裁 toolResult，其它角色不动', () => {
+    const messages = [
+      { role: 'user', content: 'q' },
+      { role: 'toolResult', content: 'C'.repeat(20_000) },
+      { role: 'assistant', content: 'a' },
+    ]
+    const next = pruneOversizedToolResultsInMessages(messages)
+    expect(next).not.toBe(messages)
+    expect(next[0]).toBe(messages[0])
+    expect(next[2]).toBe(messages[2])
+    expect(typeof next[1]!.content === 'string' && next[1]!.content.includes('工具输出已截断')).toBe(true)
+  })
+})
+
+
+test('idle watermark is 65% of effective window, below formal 90%', () => {
+  expect(PI_IDLE_PRECOMPACT_WATERMARK_RATIO).toBe(0.65)
+  expect(calculatePiIdlePrecompactWatermarkTokens(100_000)).toBe(65_000)
+  expect(calculatePiIdlePrecompactWatermarkTokens(372_000, { trustedWindow: true })).toBe(Math.floor(372_000 * 0.65))
+  expect(shouldScheduleIdlePrecompact({
+    contextTokens: 65_000,
+    contextWindow: 100_000,
+    formalThresholdTokens: 90_000,
+  })).toBe(true)
+  expect(shouldScheduleIdlePrecompact({
+    contextTokens: 64_999,
+    contextWindow: 100_000,
+    formalThresholdTokens: 90_000,
+  })).toBe(false)
+  expect(resolveIdlePrecompactDelayMs(95_000, 90_000)).toBe(PI_IDLE_PRECOMPACT_NEAR_FULL_DELAY_MS)
+  expect(resolveIdlePrecompactDelayMs(70_000, 90_000)).toBe(PI_IDLE_PRECOMPACT_DELAY_MS)
 })

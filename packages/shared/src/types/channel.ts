@@ -453,6 +453,8 @@ export interface ChannelsConfig {
   appliedPresetModelUpdates?: string[]
   /** 是否已补过 Roy 内置渠道（补过一次后用户删掉也不再补回） */
   builtinChannelsSeeded?: boolean
+  /** 是否已补过 DeepSeek 预设渠道（补过一次后用户删掉也不再补回） */
+  deepseekPresetSeeded?: boolean
   /** 渠道列表 */
   channels: Channel[]
 }

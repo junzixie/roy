@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, mock, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import * as os from 'node:os'
 import { join } from 'node:path'
+import { invalidateSettingsCache } from './settings-service'
 
 type AgentSessionManager = typeof import('./agent-session-manager')
 type AgentSessionContextPrompt = typeof import('./agent-session-context-prompt')
@@ -216,6 +217,8 @@ describe('Agent 会话 runtime 元数据', () => {
       agentEffort: 'max',
       defaultOpenAIThinkingLevel: 'medium',
     }), 'utf-8')
+    // 显式失效缓存：同一毫秒内「写文件 → 立刻读」时，mtime+size 指纹可能判定未变化
+    invalidateSettingsCache()
 
     try {
       const session = manager.createAgentSession('默认内核会话')
@@ -303,6 +306,8 @@ describe('Agent 会话 runtime 元数据', () => {
       agentEffort: 'medium',
       defaultOpenAIThinkingLevel: 'off',
     }), 'utf-8')
+    // 显式失效缓存：同一毫秒内「写文件 → 立刻读」时，mtime+size 指纹可能判定未变化
+    invalidateSettingsCache()
 
     try {
       const firstSession = manager.createAgentSession('关闭思考会话一')

@@ -38,7 +38,8 @@ function readConfig(): SystemPromptConfig {
 
   try {
     const raw = readFileSync(filePath, 'utf-8')
-    const data = JSON.parse(raw) as SystemPromptConfig
+    // 去 BOM：用户手改过的提示词文件可能带 U+FEFF
+    const data = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw) as SystemPromptConfig
 
     // 确保内置提示词始终存在，且内容与源码保持同步
     const builtinIndex = data.prompts.findIndex((p) => p.id === BUILTIN_DEFAULT_ID)

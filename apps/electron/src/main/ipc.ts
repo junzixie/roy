@@ -178,6 +178,8 @@ import { acknowledgeTerminalOutput, closeTerminalsForSession, createTerminal, ge
 import { getMainWindow } from './lib/main-window-store'
 import { isWindowMaximized, toggleMaximizeWindow, windowResizeStart, windowResizeMove, windowResizeEnd } from './lib/window-frame'
 import { resolveBrowserProfileKey } from './lib/browser-profile-policy'
+import { readContextLedger } from './lib/context-ledger'
+import type { ContextLedgerEntry } from '@roy/shared'
 import { getUnstagedChanges, invalidateGitDiffCache, getFileDiff, getUntrackedContent, revertFile, getDiffContents, listWorktrees, getWorktreeChanges, getMainRepoRoot } from './lib/git-diff-service'
 import { registerRoyDirectoryPath, registerRoyFilePath } from './lib/local-file-protocol'
 import {
@@ -2609,6 +2611,16 @@ export function registerIpcHandlers(): void {
     },
   )
 
+  // 上下文压缩账本：此前只有写入、没有读取，压缩历史写了就沉底。
+  // 只读、按会话隔离，供「上下文」面板展示每次压缩前后的 token 变化。
+  ipcMain.handle(
+    AGENT_IPC_CHANNELS.GET_CONTEXT_LEDGER,
+    async (_, id: string): Promise<ContextLedgerEntry[]> => {
+      if (typeof id !== 'string' || !id) return []
+      return readContextLedger(id)
+    },
+  )
+
   // 创建 Agent 会话
   ipcMain.handle(
     AGENT_IPC_CHANNELS.CREATE_SESSION,
@@ -3623,6 +3635,8 @@ export function registerIpcHandlers(): void {
       path: item.file,
       /** 可直接给 <video src> 用的 URL；场景型不可播，保持原值 */
       file: item.kind === 'video' ? registerRoyFilePath(item.file) : item.file,
+      /** 封面图：转成 roy-file URL 才能显示，找不到就留空让 UI 退化成图标 */
+      preview: item.preview ? registerRoyFilePath(item.preview) : '',
     }))
   })
   ipcMain.handle('app:has-workshop-wallpapers', async () => hasWorkshopWallpapers())
@@ -3632,7 +3646,6 @@ export function registerIpcHandlers(): void {
     if (typeof id !== 'string') throw new Error('壁纸编号不合法')
     return readSceneWallpaper(id)
   })
-
   // 设置里只存本地原始路径；每次启动由这里换成本次有效的 roy-file:// 地址
   // （roy-file 的 token 只在本次运行有效，存进设置的话重启后就是 404，壁纸会变空白）
   ipcMain.handle('wallpaper:file-url', async (_, filePath: unknown): Promise<string | null> => {
@@ -4754,7 +4767,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle(
     'file:read-binary-base64',
     async (_, filePath: string, access?: FileAccessOptions | string[], maxSize?: number): Promise<string | null> => {
-      const { readFileSync, statSync } = await import('node:fs')
+      const { open, stat } = await import('node:fs/promises')
       const { resolveFilePath } = await import('./lib/file-preview-service')
       const options = normalizeFileAccessOptions(access)
       // 该接口会把原始文件内容送回 renderer，只允许读取已授权路径；不能接受
@@ -4767,9 +4780,48 @@ export function registerIpcHandlers(): void {
         ? maxSize
         : MAX_ATTACHMENT_SIZE
       const effectiveMaxSize = Math.min(requestedMaxSize, MAX_ATTACHMENT_SIZE)
-      const st = statSync(resolved)
-      if (st.size > effectiveMaxSize) return null
-      return readFileSync(resolved).toString('base64')
+
+      // 以前是 statSync + readFileSync().toString('base64')：读大附件时主进程同步
+      // 阻塞，并且同时握着原始 Buffer 和 1.33 倍大的 base64 字符串，内存峰值翻倍，
+      // 界面直接冻结。改成异步分块编码后：不阻塞事件循环，每块编码完就丢掉原始
+      // 字节，峰值只有「结果字符串 + 一个块」。
+      //
+      // base64 以 3 字节为一组，所以块大小取 3 的倍数才能直接拼接。但
+      // `FileHandle.read` 允许短读，短读会让后续每一块都错位——所以这里用
+      // `carry` 攒住不足 3 字节的尾巴，只有凑满整组才编码。
+      let handle: Awaited<ReturnType<typeof open>> | null = null
+      try {
+        handle = await open(resolved, 'r')
+        const st = await handle.stat()
+        if (st.size > effectiveMaxSize) return null
+        const CHUNK = 3 * 1024 * 1024
+        const parts: string[] = []
+        let carry = Buffer.alloc(0)
+        let position = 0
+        while (position < st.size) {
+          const want = Math.min(CHUNK, st.size - position)
+          const buffer = Buffer.allocUnsafe(want)
+          const { bytesRead } = await handle.read(buffer, 0, want, position)
+          if (bytesRead === 0) break
+          position += bytesRead
+          const chunk = buffer.subarray(0, bytesRead)
+          const merged = carry.length > 0 ? Buffer.concat([carry, chunk]) : chunk
+          const usable = merged.length - (merged.length % 3)
+          if (usable > 0) {
+            parts.push(merged.toString('base64', 0, usable))
+            // 复制而不是 subarray：避免 2 字节的尾巴把整块 3MB buffer 一起吊着。
+            carry = merged.length > usable ? Buffer.from(merged.subarray(usable)) : Buffer.alloc(0)
+          } else {
+            carry = Buffer.from(merged)
+          }
+        }
+        if (carry.length > 0) parts.push(carry.toString('base64'))
+        return parts.join('')
+      } catch {
+        return null
+      } finally {
+        await handle?.close().catch(() => { /* 已关闭或句柄失效时忽略 */ })
+      }
     }
   )
 

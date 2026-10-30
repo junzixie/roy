@@ -77,7 +77,8 @@ function readRawConfig(): FeishuMultiBotConfig {
 
   try {
     const raw = readFileSync(configPath, 'utf-8')
-    const data = JSON.parse(raw) as Record<string, unknown>
+    // 去 BOM：用户手改过的飞书配置可能带 U+FEFF
+    const data = JSON.parse(raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw) as Record<string, unknown>
 
     // v2 格式
     if (data.version === 2 && Array.isArray(data.bots)) {

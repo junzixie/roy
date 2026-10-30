@@ -212,7 +212,14 @@ function runGitProcess(args: string[], cwd: string, options?: { quiet?: boolean 
         if (code === 0) {
           finish(stdout.trim())
         } else {
-          if (!options?.quiet) console.error('[git-diff-service] git 命令失败:', args.join(' '), stderr.trim())
+          // 「不是 git 仓库」是正常状态，不是错误：用户在普通文件夹里打开项目时，
+          // 每次刷新侧栏都会跑 ls-files / diff HEAD，全部失败。
+          // 原来一律按 error 记录，实测单次运行写了 216 行红色错误，
+          // 把真正的失败淹掉了。这类已知的可预期结果降级为静默。
+          const isNotARepo = /not a git repository|Not a git repository/i.test(stderr)
+          if (!options?.quiet && !isNotARepo) {
+            console.error('[git-diff-service] git 命令失败:', args.join(' '), stderr.trim())
+          }
           finish(null)
         }
       })
