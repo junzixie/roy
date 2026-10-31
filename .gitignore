@@ -10,6 +10,7 @@ dist/
 release/
 out/
 apps/electron/dist/
+apps/electron/dist-out/
 apps/electron/out/
 apps/electron/release/
 
