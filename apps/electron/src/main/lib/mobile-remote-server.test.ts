@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test'
 import { MobileRemoteServer, isPrivateRemoteAddress, type RemoteGateway } from './mobile-remote-server'
+
+// 开发机配了系统代理时，Bun 的 fetch 会把 127.0.0.1 的请求也发给代理，本地请求要显式绕开
+process.env.NO_PROXY = [process.env.NO_PROXY, '127.0.0.1', 'localhost'].filter(Boolean).join(',')
+process.env.no_proxy = process.env.NO_PROXY
+
 const gateway: RemoteGateway = { bootstrap: () => ({ ok: true }), search: () => ({ results: [] }), sessions: () => ({ sessions: [] }), conversation: () => ({ messages: [] }), create: () => ({ id: 's' }), send: () => ({ ok: true }), stop: () => ({ ok: true }), respond: () => ({ ok: true }) }
 test('仅允许私有 IPv4', () => { expect(isPrivateRemoteAddress('192.168.1.8')).toBe(true); expect(isPrivateRemoteAddress('::ffff:10.0.0.2')).toBe(true); expect(isPrivateRemoteAddress('8.8.8.8')).toBe(false); expect(isPrivateRemoteAddress('::1')).toBe(false) })
 test('配对码一次有效且需电脑批准', async () => {

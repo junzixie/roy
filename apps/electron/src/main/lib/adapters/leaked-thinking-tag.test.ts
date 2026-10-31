@@ -18,7 +18,7 @@ describe('splitLeakedThinkingTag', () => {
   })
 
   test('工具调用前的说明也挪成正文，且排在 toolCall 之前', () => {
-    const toolCall = { type: 'toolCall', id: 't1', name: 'bash', arguments: {} }
+    const toolCall = { type: 'toolCall' as const, id: 't1', name: 'bash', arguments: {} }
     const fixed = splitLeakedThinkingTag(message([
       { type: 'thinking', thinking: '值得再跑一个统计。</think>\n我统计一下分布。' },
       toolCall,
