@@ -181,6 +181,12 @@ Before submitting a PR, please check the following:
  </picture>
 </a>
 
+## Origin and official services
+
+Roy is developed from the open-source edition of Proma (AGPL-3.0). Attribution and third-party components are listed in [NOTICE](./NOTICE). The fuller early documentation is kept at [docs/README-upstream.md](./docs/README-upstream.md).
+
+The open-source edition runs entirely on your own API keys. A few features depend on Roy's official servers (configured in `roy-server-cert.ts` and `pinned-certificates.ts`) and are unavailable on self-hosted builds: the built-in official model channel and account login, automatic update checks, and the third-party installer manifest. Core Chat / Agent / tools / in-app browser and terminal are unaffected.
+
 ## License
 
 The Roy Community Edition is open-sourced under the [GNU Affero General Public License v3.0 (AGPL-3.0)](./LICENSE). See the root `LICENSE` file for the full terms.

@@ -1,0 +1,21 @@
+Roy
+Copyright 2026 Roy contributors
+
+本软件以 GNU Affero General Public License v3.0 授权发布，完整条款见 LICENSE。
+
+## 来源
+
+Roy 由 Proma 开源版发展而来。上游以 AGPL-3.0 授权，Roy 同样以 AGPL-3.0 发布，
+相关衍生部分继续适用 AGPL-3.0。
+
+## 第三方组件
+
+- pi（@earendil-works/pi-ai、pi-coding-agent、pi-mcp、pi-agent-core）：MIT，Roy 的 Agent 内核
+- node-pty：MIT，内嵌终端
+- Electron、React、Vite、Jotai、CodeMirror 等：各自上游许可证，见 `bun.lock` 与各包随附的 LICENSE
+- 对 pi-ai、pi-coding-agent、node-pty 的本地修改见 `patches/`
+
+## 对上游品牌的保留
+
+部分上游接口按 `Proma` 产品名做校验（如 Coding Plan 相关 UA），相关位置刻意保留原值，
+见 `docs/Proma命名残留清单.md`。
