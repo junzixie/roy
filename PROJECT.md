@@ -19,7 +19,6 @@ E:\AIproject\02-roy-harness
 | apps/ packages/ patches/ | 主代码 |
 | docs/ | 产品文档 + harness 审查/验收/市场清单 |
 | release/ | NSIS 安装包与构建日志（如 Roy-0.19.88-setup.exe） |
-| mirror/ | 精选源码镜像（历史对照） |
 | scripts/harness/ | harness 侧脚本 |
 | 审查报告.md 改造进度.md | harness 进度 |
 
